@@ -1,1 +1,1 @@
-export default {content:['./index.html','./src/**/*.{ts,tsx}'],theme:{extend:{colors:{ink:'#13241e',mint:'#dff5e9',green:'#167a57',cream:'#f8f7f1',coral:'#e87d60'}}},plugins:[]}
+export default {content:['./index.html','./src/**/*.{ts,tsx}'],theme:{extend:{colors:{ink:'#0B1F3A',navy:'#07152A',mint:'#EFF6FF',green:'#2563EB',cream:'#F8FAFC',slate:'#64748B',success:'#16A34A',warning:'#F59E0B',danger:'#DC2626',coral:'#DC2626'}}},plugins:[]}

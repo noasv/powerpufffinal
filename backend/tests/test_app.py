@@ -39,3 +39,52 @@ def test_goal_parser_mock_and_malformed_fallback(monkeypatch):
  h=auth_setup('ai@test.com');r=client.post('/api/ai/parse-goal',headers=h,json={'text':'Chemical engineering scholarship in Europe'});assert r.status_code==200;assert r.json()['target_field']=='Chemical Engineering'
  from app.main import ai
  monkeypatch.setattr(ai,'complete',lambda _: 'not json');r=client.post('/api/ai/parse-goal',headers=h,json={'text':'a valid longer goal'});assert r.json()['confidence']==.5
+
+def profile_payload(ielts=None):
+ return {'birth_year':date.today().year-17,'country':'Kazakhstan','city':'','education_level':'HIGH_SCHOOL','grade_year':'11','gpa':3.7,'gpa_scale':4,'english_level':'B2','ielts_score':ielts,'sat_score':None,'budget_level':'LOW','preferred_countries':['United States'],'preferred_fields':['Computer Science'],'skills':['Python'],'interests':['Technology'],'achievements':'Math project','extracurriculars':'Coding club','volunteering':'School volunteer','research_experience':'','work_experience':''}
+
+def computer_science_goal():
+ return {'title':'Computer Science in the United States','description':'CS with a full scholarship','goal_type':'UNIVERSITY_ADMISSION','target_field':'Computer Science','target_countries':['United States'],'funding_requirement':'HIGH','education_level':'BACHELOR','language':'English'}
+
+def test_registration_token_completes_atomic_onboarding_with_own_goal():
+ h=auth_setup('fresh-cs@example.com')
+ assert client.get('/api/dashboard',headers=h).json()['needs_onboarding'] is True
+ result=client.post('/api/onboarding/complete',headers=h,json={'profile':profile_payload(),'goal':computer_science_goal()})
+ assert result.status_code==200 and result.json()['success'] is True
+ assert result.json()['recommendations'] is not None
+ dashboard=client.get('/api/dashboard',headers=h).json()
+ assert dashboard['goal']['target_field']=='Computer Science'
+ assert 'Chemical Engineering' not in dashboard['goal']['title']
+ assert dashboard['history'] and dashboard['tasks']
+
+def test_gap_detail_matching_and_roadmap_idempotency_and_ownership():
+ h=auth_setup('gap-detail@example.com');client.post('/api/onboarding/complete',headers=h,json={'profile':profile_payload(),'goal':computer_science_goal()})
+ with SessionLocal() as db:
+  o1=Opportunity(title='CS Research Lab',provider='One',opportunity_type='RESEARCH',description='Research',country='International',deadline=date.today()+timedelta(days=60),eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',fields='["Computer Science"]',gap_categories='["EXPERIENCE"]')
+  o2=Opportunity(title='Summer Computing',provider='Two',opportunity_type='SUMMER_SCHOOL',description='Research',country='International',deadline=date.today()+timedelta(days=70),eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',fields='["Computer Science"]',gap_categories='["EXPERIENCE"]');db.add_all([o1,o2]);db.commit();ids=(o1.id,o2.id)
+ dash=client.get('/api/dashboard',headers=h).json();gap=next(g for g in dash['gaps'] if g['category']=='EXPERIENCE')
+ detail=client.get(f"/api/gaps/{gap['id']}",headers=h).json()
+ assert all(detail[k] for k in ('title','category','severity','why','evidence','current_state','target_state','status'))
+ assert {o['id'] for o in detail['opportunities']}.issuperset(ids)
+ for oid in (*ids,ids[0]):assert client.post(f'/api/opportunities/{oid}/roadmap',headers=h).status_code==200
+ road=client.get('/api/roadmap',headers=h).json();owned=[t for t in road['tasks'] if t['opportunity_id'] in ids]
+ assert len([t for t in owned if t['opportunity_id']==ids[0]])==6
+ assert {t['opportunity_title'] for t in owned}=={'CS Research Lab','Summer Computing'}
+
+def test_advisor_changes_when_language_gap_resolves():
+ h=auth_setup('advisor-state@example.com');client.post('/api/onboarding/complete',headers=h,json={'profile':profile_payload(),'goal':computer_science_goal()})
+ before=client.post('/api/ai/advisor',headers=h,json={'question':'What should I focus on this month and why?'}).json()['answer']
+ assert 'Official English evidence missing' in before
+ updated=profile_payload(7.0);client.put('/api/profile',headers=h,json=updated)
+ after=client.post('/api/ai/advisor',headers=h,json={'question':'What should I focus on this month and why?'}).json()['answer']
+ assert after!=before and 'Official English evidence missing' not in after and 'Computer Science' in after
+
+def test_demo_seed_canonical_and_idempotent():
+ from app.seed import seed
+ seed()
+ with SessionLocal() as db:
+  u=db.query(User).filter_by(email='student@demo.com').one();before=(db.query(User).count(),db.query(StudentProfile).filter_by(user_id=u.id).count(),db.query(Goal).filter_by(user_id=u.id).count(),db.query(RoadmapTask).join(Roadmap).filter(Roadmap.user_id==u.id).count())
+ seed()
+ with SessionLocal() as db:
+  u=db.query(User).filter_by(email='student@demo.com').one();p=db.query(StudentProfile).filter_by(user_id=u.id).one();g=db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').one();after_counts=(db.query(User).count(),db.query(StudentProfile).filter_by(user_id=u.id).count(),db.query(Goal).filter_by(user_id=u.id).count(),db.query(RoadmapTask).join(Roadmap).filter(Roadmap.user_id==u.id).count())
+  assert before==after_counts;assert u.name=='Aruzhan Demo' and p.grade_year=='11' and p.ielts_score is None and not p.research_experience;assert g.target_field=='Chemical Engineering'

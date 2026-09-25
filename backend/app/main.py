@@ -24,6 +24,7 @@ class GoalIn(BaseModel): title:str;description:str='';goal_type:str='UNIVERSITY_
 class ParseIn(BaseModel): text:str=Field(min_length=5)
 class AdvisorIn(BaseModel): question:str=Field(min_length=2)
 class ReviewIn(BaseModel): opportunity_id:int;document_type:str='MOTIVATION_LETTER';title:str='Draft';content:str=Field(min_length=20)
+class OnboardingIn(BaseModel): profile:ProfileIn;goal:GoalIn
 def token(u):return jwt.encode({'sub':str(u.id),'exp':datetime.utcnow()+timedelta(hours=12)},settings.jwt_secret,algorithm='HS256')
 def current(raw:str=Depends(oauth),db:Session=Depends(get_db)):
  try: uid=int(jwt.decode(raw,settings.jwt_secret,algorithms=['HS256'])['sub'])
@@ -36,6 +37,12 @@ def profile_dict(p):
  for k in ('preferred_countries','preferred_fields','skills','interests'):d[k]=j(d[k])
  return d
 def active(db,u):return db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').order_by(Goal.id.desc()).first()
+def create_goal_records(db:Session,u:User,x:GoalIn):
+ db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').update({'status':'PAUSED'})
+ g=Goal(user_id=u.id,**{**x.model_dump(),'target_countries':json.dumps(x.target_countries)});db.add(g);db.flush()
+ reqs=[('ACADEMIC','Competitive academic record','Maintain evidence of strong relevant coursework','3.2 GPA'),('LANGUAGE','Certified English proficiency','Provide recognized English test evidence','IELTS 6.5'),('EXPERIENCE','Subject-related experience','Build a project or research experience','1 project'),('APPLICATION','Application narrative','Prepare a tailored motivation letter','Complete draft'),('FINANCIAL','Funding plan','Identify sufficient funding','Substantial funding')]
+ for cat,n,d,t in reqs:db.add(Requirement(goal_id=g.id,category=cat,name=n,description=d,target_value=t))
+ return g
 @app.get('/api/health')
 def health(db:Session=Depends(get_db)):
  db.execute(text('select 1'));return {'status':'ok','database':'ok','ai_provider':'mock' if ai.fallback_active else settings.ai_provider,'demo_ai':ai.fallback_active}
@@ -71,12 +78,20 @@ def parse_goal(x:ParseIn,u=Depends(current)):
 def goals(u=Depends(current),db:Session=Depends(get_db)):return db.query(Goal).filter_by(user_id=u.id).all()
 @app.post('/api/goals')
 def create_goal(x:GoalIn,u=Depends(current),db:Session=Depends(get_db)):
- db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').update({'status':'PAUSED'});g=Goal(user_id=u.id,**{**x.model_dump(),'target_countries':json.dumps(x.target_countries)});db.add(g);db.flush()
- reqs=[('ACADEMIC','Competitive academic record','Maintain evidence of strong relevant coursework','3.2 GPA'),('LANGUAGE','Certified English proficiency','Provide recognized English test evidence','IELTS 6.5'),('EXPERIENCE','Subject-related experience','Build a project or research experience','1 project'),('APPLICATION','Application narrative','Prepare a tailored motivation letter','Complete draft'),('FINANCIAL','Funding plan','Identify sufficient funding','Substantial funding')]
- for cat,n,d,t in reqs:db.add(Requirement(goal_id=g.id,category=cat,name=n,description=d,target_value=t))
+ g=create_goal_records(db,u,x)
  p=db.query(StudentProfile).filter_by(user_id=u.id).first()
  if p:sync_gaps(db,u.id,g,p);readiness(db,u.id,g,p);generate_roadmap(db,u,g)
  db.commit();return g
+@app.post('/api/onboarding/complete')
+def complete_onboarding(x:OnboardingIn,u=Depends(current),db:Session=Depends(get_db)):
+ """Complete onboarding atomically so a partial path can never reach the dashboard."""
+ p=db.query(StudentProfile).filter_by(user_id=u.id).first() or StudentProfile(user_id=u.id)
+ for k,v in x.profile.model_dump().items():setattr(p,k,json.dumps(v) if isinstance(v,list) else v)
+ db.add(p);db.flush();g=create_goal_records(db,u,x.goal);db.flush()
+ sync_gaps(db,u.id,g,p);ready=readiness(db,u.id,g,p);road=generate_roadmap(db,u,g)
+ gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all()
+ recommendations=sorted([opportunity_view(p,g,o,gs,ready) for o in db.query(Opportunity).all()],key=lambda z:z['match_score'],reverse=True)[:5]
+ db.commit();return {'success':True,'goal_id':g.id,'roadmap_id':road.id,'readiness':ready,'recommendations':recommendations}
 @app.get('/api/goals/{goal_id}')
 def goal(goal_id:int,u=Depends(current),db:Session=Depends(get_db)):
  g=db.get(Goal,goal_id)
@@ -91,6 +106,16 @@ def analyze(goal_id:int,u=Depends(current),db:Session=Depends(get_db)):
  sync_gaps(db,u.id,g,p);db.commit();return db.query(ProfileGap).filter_by(goal_id=g.id).all()
 @app.get('/api/goals/{goal_id}/gaps')
 def gaps(goal_id:int,u=Depends(current),db:Session=Depends(get_db)):return db.query(ProfileGap).filter_by(user_id=u.id,goal_id=goal_id).all()
+@app.get('/api/gaps/{gap_id}')
+def gap_detail(gap_id:int,u=Depends(current),db:Session=Depends(get_db)):
+ gap=db.get(ProfileGap,gap_id)
+ if not gap or gap.user_id!=u.id:raise HTTPException(404,'Gap not found')
+ p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=db.get(Goal,gap.goal_id);ready=readiness(db,u.id,g,p,False)
+ related=[]
+ for o in db.query(Opportunity).all():
+  if gap.category in j(o.gap_categories):related.append(opportunity_view(p,g,o,[gap],ready))
+ related.sort(key=lambda z:z['match_score'],reverse=True)
+ return {'id':gap.id,'title':gap.title,'category':gap.category,'severity':gap.severity,'why':gap.description,'evidence':gap.evidence,'current_state':gap.current_state,'target_state':gap.target_state,'status':gap.status,'opportunities':related[:6]}
 @app.get('/api/opportunities')
 def opportunities(search:str='',opportunity_type:str='',country:str='',funding:str='',sort:str='recommended',u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
@@ -116,7 +141,9 @@ def add_roadmap(oid:int,u=Depends(current),db:Session=Depends(get_db)):
 def roadmap(u=Depends(current),db:Session=Depends(get_db)):
  g=active(db,u)
  if not g:return {'roadmap':None,'tasks':[]}
- r=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=r.id).order_by(RoadmapTask.due_date).all() if r else [];return {'roadmap':r,'tasks':tasks}
+ r=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=r.id).order_by(RoadmapTask.due_date).all() if r else []
+ opps={o.id:o for o in db.query(Opportunity).filter(Opportunity.id.in_({t.opportunity_id for t in tasks if t.opportunity_id})).all()}
+ return {'roadmap':r,'tasks':[{**{c.name:getattr(t,c.name) for c in t.__table__.columns},'opportunity_title':opps[t.opportunity_id].title if t.opportunity_id in opps else None,'opportunity_deadline':opps[t.opportunity_id].deadline if t.opportunity_id in opps else None} for t in tasks]}
 @app.post('/api/goals/{goal_id}/roadmap/generate')
 def roadmap_generate(goal_id:int,u=Depends(current),db:Session=Depends(get_db)):
  g=db.get(Goal,goal_id);r=generate_roadmap(db,u,g);db.commit();return r
@@ -129,9 +156,15 @@ def task_complete(tid:int,u=Depends(current),db:Session=Depends(get_db)):
 def dashboard(u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return {'needs_onboarding':True}
- gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted(opps,key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
+ gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted(opps,key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'user':{'name':u.name},'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
 @app.post('/api/ai/advisor')
-def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):return {'answer':ai.complete('ADVISOR '+x.question),'demo_ai':ai.fallback_active}
+def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
+ p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
+ if not p or not g:raise HTTPException(409,'Complete onboarding before using the advisor')
+ gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first()
+ tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else [];saved_ids={t.opportunity_id for t in tasks if t.opportunity_id};saved=db.query(Opportunity).filter(Opportunity.id.in_(saved_ids)).all() if saved_ids else []
+ context={'profile':{'country':p.country,'grade_year':p.grade_year,'english_level':p.english_level,'ielts_score':p.ielts_score},'goal':{'title':g.title,'field':g.target_field,'funding':g.funding_requirement},'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity} for z in gs if z.status=='OPEN'],'resolved_gaps':[z.title for z in gs if z.status=='RESOLVED'],'readiness':r,'saved_opportunities':[z.title for z in saved],'todo_tasks':[z.title for z in tasks if z.status in ('TODO','IN_PROGRESS')][:8]}
+ return {'answer':ai.complete('ADVISOR_CONTEXT '+json.dumps(context)+' QUESTION '+x.question),'demo_ai':ai.fallback_active}
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
  if not db.get(Opportunity,x.opportunity_id):raise HTTPException(404,'Opportunity not found')
