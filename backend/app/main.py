@@ -13,13 +13,14 @@ from .models import *
 from .config.settings import settings
 from .services.engines import *
 from .services.ai import ai
+from .services.domains import canonical_domain,detect_opportunity_type,field_relevance
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 passwords=PasswordHash.recommended();oauth=OAuth2PasswordBearer(tokenUrl='/api/auth/login')
 class Register(BaseModel): name:str=Field(min_length=2);email:EmailStr;password:str=Field(min_length=8);country:str=''
 class Login(BaseModel): email:EmailStr;password:str
 class ProfileIn(BaseModel):
- birth_year:int|None=None;country:str='';city:str='';education_level:str='HIGH_SCHOOL';grade_year:str='';gpa:float|None=None;gpa_scale:float=4;english_level:str='B2';ielts_score:float|None=None;sat_score:int|None=None;budget_level:str='LOW';preferred_countries:list[str]=[];preferred_fields:list[str]=[];skills:list[str]=[];interests:list[str]=[];achievements:str='';extracurriculars:str='';volunteering:str='';research_experience:str='';work_experience:str=''
+ birth_year:int|None=None;country:str='';city:str='';education_level:str='HIGH_SCHOOL';grade_year:str='';gpa:float|None=None;gpa_scale:float=4;english_level:str='B2';ielts_score:float|None=None;sat_score:int|None=None;budget_level:str='LOW';preferred_countries:list[str]=[];preferred_fields:list[str]=[];skills:list[str]=[];interests:list[str]=[];achievements:str='';projects:str='';extracurriculars:str='';volunteering:str='';research_experience:str='';work_experience:str=''
 class GoalIn(BaseModel): title:str;description:str='';goal_type:str='UNIVERSITY_ADMISSION';target_field:str='';target_countries:list[str]=[];target_date:date|None=None;funding_requirement:str='HIGH';education_level:str='BACHELOR';language:str='English'
 class ParseIn(BaseModel): text:str=Field(min_length=5)
 class AdvisorIn(BaseModel): question:str=Field(min_length=2)
@@ -40,8 +41,8 @@ def active(db,u):return db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').o
 def create_goal_records(db:Session,u:User,x:GoalIn):
  db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').update({'status':'PAUSED'})
  g=Goal(user_id=u.id,**{**x.model_dump(),'target_countries':json.dumps(x.target_countries)});db.add(g);db.flush()
- reqs=[('ACADEMIC','Competitive academic record','Maintain evidence of strong relevant coursework','3.2 GPA'),('LANGUAGE','Certified English proficiency','Provide recognized English test evidence','IELTS 6.5'),('EXPERIENCE','Subject-related experience','Build a project or research experience','1 project'),('APPLICATION','Application narrative','Prepare a tailored motivation letter','Complete draft'),('FINANCIAL','Funding plan','Identify sufficient funding','Substantial funding')]
- for cat,n,d,t in reqs:db.add(Requirement(goal_id=g.id,category=cat,name=n,description=d,target_value=t))
+ reqs=[('ACADEMIC','Competitive academic record','Academic expectations vary by selected program','Unknown','GENERAL_GUIDANCE'),('LANGUAGE','English certification guidance','Official English certification may be required; exact target depends on selected programs.','Unknown — select a program for a verified target','GENERAL_GUIDANCE'),('EXPERIENCE','Subject-related experience','Build relevant project or research evidence','Relevant evidence','GENERAL_GUIDANCE'),('APPLICATION','Application narrative','Prepare a tailored motivation letter','Complete draft','GENERAL_GUIDANCE'),('FINANCIAL','Funding plan','Identify sufficient funding','Substantial funding','GOAL_REQUIREMENT')]
+ for cat,n,d,t,source in reqs:db.add(Requirement(goal_id=g.id,category=cat,name=n,description=d,target_value=t,source_type=source))
  return g
 @app.get('/api/health')
 def health(db:Session=Depends(get_db)):
@@ -90,7 +91,8 @@ def complete_onboarding(x:OnboardingIn,u=Depends(current),db:Session=Depends(get
  db.add(p);db.flush();g=create_goal_records(db,u,x.goal);db.flush()
  sync_gaps(db,u.id,g,p);ready=readiness(db,u.id,g,p);road=generate_roadmap(db,u,g)
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all()
- recommendations=sorted([opportunity_view(p,g,o,gs,ready) for o in db.query(Opportunity).all()],key=lambda z:z['match_score'],reverse=True)[:5]
+ recommendations=[opportunity_view(p,g,o,gs,ready) for o in db.query(Opportunity).all()]
+ recommendations=sorted([v for v in recommendations if v['eligibility_status']!='NOT_ELIGIBLE' and v['field_relevance']>=35],key=lambda z:z['match_score'],reverse=True)[:5]
  db.commit();return {'success':True,'goal_id':g.id,'roadmap_id':road.id,'readiness':ready,'recommendations':recommendations}
 @app.get('/api/goals/{goal_id}')
 def goal(goal_id:int,u=Depends(current),db:Session=Depends(get_db)):
@@ -126,7 +128,8 @@ def opportunities(search:str='',opportunity_type:str='',country:str='',funding:s
  if country:q=q.filter_by(country=country)
  if funding:q=q.filter_by(funding_type=funding)
  data=[opportunity_view(p,g,o,gs,r) for o in q.all()]
- key={'readiness':'readiness_score','deadline':'deadline','impact':'gap_impact'}.get(sort,'match_score');return sorted(data,key=lambda x:(x[key] is not None,x[key]),reverse=sort!='deadline')
+ if sort=='recommended': data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE' and x['field_relevance']>=35]
+ key={'readiness':'readiness_score','deadline':'deadline','impact':'gap_impact_score'}.get(sort,'match_score');return sorted(data,key=lambda x:(x[key] is not None,x[key]),reverse=sort!='deadline')
 @app.get('/api/opportunities/{oid}')
 def opportunity(oid:int,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u);o=db.get(Opportunity,oid)
@@ -156,15 +159,45 @@ def task_complete(tid:int,u=Depends(current),db:Session=Depends(get_db)):
 def dashboard(u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return {'needs_onboarding':True}
- gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted(opps,key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'user':{'name':u.name},'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
+ gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted([v for v in opps if v['eligibility_status']!='NOT_ELIGIBLE' and v['field_relevance']>=35],key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'user':{'name':u.name},'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
 @app.post('/api/ai/advisor')
 def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:raise HTTPException(409,'Complete onboarding before using the advisor')
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first()
  tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else [];saved_ids={t.opportunity_id for t in tasks if t.opportunity_id};saved=db.query(Opportunity).filter(Opportunity.id.in_(saved_ids)).all() if saved_ids else []
- context={'profile':{'country':p.country,'grade_year':p.grade_year,'english_level':p.english_level,'ielts_score':p.ielts_score},'goal':{'title':g.title,'field':g.target_field,'funding':g.funding_requirement},'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity} for z in gs if z.status=='OPEN'],'resolved_gaps':[z.title for z in gs if z.status=='RESOLVED'],'readiness':r,'saved_opportunities':[z.title for z in saved],'todo_tasks':[z.title for z in tasks if z.status in ('TODO','IN_PROGRESS')][:8]}
- return {'answer':ai.complete('ADVISOR_CONTEXT '+json.dumps(context)+' QUESTION '+x.question),'demo_ai':ai.fallback_active}
+ all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
+ context={'profile':profile_dict(p),'goal':{'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state} for z in gs if z.status=='OPEN'],'resolved_gaps':[z.title for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':[{'title':z.title,'status':z.status,'due_date':str(z.due_date)} for z in tasks],'saved_opportunities':[z.title for z in saved],'todo_tasks':[z.title for z in tasks if z.status in ('TODO','IN_PROGRESS')][:8],'relevant_opportunities':[{'title':v['title'],'type':v['opportunity_type'],'match':v['match_score'],'eligibility':v['eligibility_status'],'deadline':str(v['deadline'])} for v in sorted(views,key=lambda v:v['match_score'],reverse=True)[:8]]}
+ question=x.question.lower(); requested_type=detect_opportunity_type(question)
+ search_intent=any(term in question for term in ('find','search','recommend','show me','opportunities','olympiad','scholarship','program'))
+ if search_intent:
+  requested_field=canonical_domain(question)
+  # If no known field was expressed, use the active goal rather than inventing one.
+  if requested_field not in {'Economics','Computer Science','Chemical Engineering','Engineering','Mathematics','Social Sciences'}: requested_field=g.target_field
+  matches=[]
+  for opp,view in zip(all_opps,views):
+   if requested_type and opp.opportunity_type!=requested_type: continue
+   if field_relevance(requested_field,j(opp.fields))<75 or view['eligibility_status']=='NOT_ELIGIBLE': continue
+   matches.append((view['match_score'],opp))
+  matches.sort(key=lambda pair:pair[0],reverse=True)
+  if not matches: answer="I couldn't find a matching opportunity in the current Pathly dataset."
+  else: answer='I found these stored opportunities: '+ '; '.join(f'{o.title} ({o.opportunity_type.replace("_"," ").title()}, deadline {o.deadline.isoformat() if o.deadline else "not stored"})' for _,o in matches[:5])+'. These names and deadlines come from the Demo dataset; verify them at the stored source.'
+  return {'answer':answer,'intent':'OPPORTUNITY_SEARCH','opportunity_ids':[o.id for _,o in matches[:5]],'demo_ai':ai.fallback_active}
+ if ai.fallback_active:
+  open_gaps=context['open_gaps'];top=open_gaps[0] if open_gaps else None
+  if 'readiness' in question:
+   return {'answer':f"Your overall preparedness heuristic is {r['overall']}%. Academic: {r['academic']}%, language: {r['language']}%, experience: {r['experience']}%, extracurricular: {r['extracurricular']}%, financial: {r['financial']}%, application: {r['application']}%. This is not an admission probability.",'intent':'READINESS','demo_ai':True}
+  if 'gap' in question or 'missing' in question:
+   answer='Your open gaps are: '+('; '.join(f"{z['title']} ({z['severity']})" for z in open_gaps) if open_gaps else 'none currently identified')+'.'
+   return {'answer':answer,'intent':'GAPS','demo_ai':True}
+  if 'roadmap' in question or 'plan' in question:
+   return {'answer':'Your next roadmap steps are: '+('; '.join(context['todo_tasks'][:5]) if context['todo_tasks'] else 'no incomplete stored tasks')+'.','intent':'ROADMAP','demo_ai':True}
+  if 'compare' in question or ' versus ' in question or ' vs ' in question:
+   names=[v for v in context['relevant_opportunities'] if v['title'].lower() in question]
+   return {'answer':('Stored comparison: '+'; '.join(f"{v['title']} — match {v['match']}%, {v['eligibility']}" for v in names)) if len(names)>=2 else 'Name two stored opportunities from your feed so I can compare their match and eligibility.','intent':'COMPARISON','demo_ai':True}
+  if 'profile' in question or 'improve' in question:
+   return {'answer':f"Improve your profile with real evidence for your highest open gap: {top['title'] if top else 'keep existing evidence current'}. Do not add activities you cannot substantiate.",'intent':'PROFILE_IMPROVEMENT','demo_ai':True}
+ return {'answer':ai.complete('ADVISOR_CONTEXT '+json.dumps(context)+' QUESTION '+x.question),'intent':'GUIDANCE','demo_ai':ai.fallback_active}
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
  if not db.get(Opportunity,x.opportunity_id):raise HTTPException(404,'Opportunity not found')
