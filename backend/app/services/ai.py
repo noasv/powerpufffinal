@@ -1,15 +1,19 @@
 import json,httpx
 from abc import ABC,abstractmethod
 from ..config.settings import settings
+from .domains import canonical_domain, detect_opportunity_type
 class AIProvider(ABC):
  @abstractmethod
  def complete(self,prompt:str)->str: ...
 class MockAIProvider(AIProvider):
  def complete(self,prompt):
   if 'PARSE_GOAL' in prompt:
-   lower=prompt.lower();field='Computer Science' if 'computer science' in lower else ('Chemical Engineering' if 'chemical' in lower else 'Engineering')
-   regions=['United States'] if 'united states' in lower or ' usa' in lower else ['Europe']
-   return json.dumps({'goal_type':'UNIVERSITY_ADMISSION','target_field':field,'target_regions':regions,'language':'English','funding_requirement':'HIGH' if 'scholar' in lower or 'full funding' in lower else 'MEDIUM','education_level':'BACHELOR','confidence':.91})
+   lower=prompt.lower();field=canonical_domain(lower.replace('parse_goal',''))
+   countries=[name for name in ['United States','Germany','Netherlands','United Kingdom','Canada','Europe','Asia'] if name.lower() in lower or (name=='United States' and ' usa' in lower)]
+   typ=detect_opportunity_type(lower)
+   level='MASTER' if 'master' in lower else 'PHD' if 'phd' in lower or 'doctor' in lower else 'BACHELOR'
+   language='German' if 'german-taught' in lower or 'in german' in lower else 'English'
+   return json.dumps({'goal_type':'UNIVERSITY_ADMISSION','target_field':field,'target_opportunity_type':typ,'target_regions':countries,'language':language,'funding_requirement':'HIGH' if any(x in lower for x in ('scholar','full funding','financial aid','substantial funding')) else 'MEDIUM','education_level':level,'constraints':[],'confidence':.91})
   if 'REVIEW' in prompt:return json.dumps({'overall_score':72,'requirement_coverage':{'Leadership':70,'Academic motivation':88,'Community impact':35},'strengths':['Clear academic motivation'],'gaps':['Community impact lacks concrete evidence'],'recommendations':['Add a concrete community-impact example and measurable outcome if one exists.']})
   if 'ADVISOR_CONTEXT ' in prompt:
    raw=prompt.split('ADVISOR_CONTEXT ',1)[1].split(' QUESTION ',1)[0];ctx=json.loads(raw);gaps=ctx['open_gaps'];top=gaps[0] if gaps else None

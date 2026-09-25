@@ -88,3 +88,42 @@ def test_demo_seed_canonical_and_idempotent():
  with SessionLocal() as db:
   u=db.query(User).filter_by(email='student@demo.com').one();p=db.query(StudentProfile).filter_by(user_id=u.id).one();g=db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').one();after_counts=(db.query(User).count(),db.query(StudentProfile).filter_by(user_id=u.id).count(),db.query(Goal).filter_by(user_id=u.id).count(),db.query(RoadmapTask).join(Roadmap).filter(Roadmap.user_id==u.id).count())
   assert before==after_counts;assert u.name=='Aruzhan Demo' and p.grade_year=='11' and p.ielts_score is None and not p.research_experience;assert g.target_field=='Chemical Engineering'
+
+def no_experience_profile():
+ return StudentProfile(birth_year=date.today().year-17,country='Kazakhstan',education_level='HIGH_SCHOOL',gpa=3.9,gpa_scale=4,english_level='B2',budget_level='LOW',projects='',research_experience='',work_experience='',extracurriculars='',volunteering='',achievements='')
+
+def test_readiness_uses_independent_evidence_categories():
+ with SessionLocal() as db:
+  u=User(name='Evidence',email='evidence@test.com',password_hash='x');db.add(u);db.flush();p=no_experience_profile();p.user_id=u.id;db.add(p);g=Goal(user_id=u.id,title='Economics',target_field='Economics',funding_requirement='HIGH');db.add(g);db.flush()
+  empty=readiness(db,u.id,g,p,False);assert empty['experience']<=20 and empty['extracurricular']<=20
+  p.projects='Econometrics analysis project';project=readiness(db,u.id,g,p,False);assert project['experience']>empty['experience'] and project['extracurricular']==empty['extracurricular'] and project['academic']==empty['academic']
+  p.projects='';p.research_experience='Research assistant on an economics study';research=readiness(db,u.id,g,p,False);assert research['experience']>empty['experience']
+  p.research_experience='';p.volunteering='Food bank volunteer';volunteer=readiness(db,u.id,g,p,False);assert volunteer['extracurricular']>empty['extracurricular'] and volunteer['experience']==empty['experience'] and volunteer['language']==empty['language']
+
+def test_normalized_field_ranking_and_gap_specific_impact():
+ p=no_experience_profile();g=Goal(title='Economics abroad',target_field='Economics',target_countries='[]',funding_requirement='HIGH')
+ gap=ProfileGap(id=100,category='EXPERIENCE',title='Research evidence',severity='HIGH',status='OPEN')
+ def opp(title,typ,fields,cats,restricted=False):return Opportunity(id=100+len(title),title=title,provider='Demo',opportunity_type=typ,description='demo',fields=json.dumps(fields),gap_categories=json.dumps(cats),eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',field_restriction=restricted,funding_type='FULL',country='International')
+ econ=opportunity_view(p,g,opp('Economics Olympiad','COMPETITION',['Economics'],['EXPERIENCE']),[gap],{'overall':20})
+ general=opportunity_view(p,g,opp('General Scholarship','SCHOLARSHIP',['General'],['FINANCIAL']),[gap],{'overall':20})
+ chemistry=opportunity_view(p,g,opp('Chemistry Degree','UNIVERSITY_PROGRAM',['Chemistry'],['ACADEMIC'],True),[gap],{'overall':20})
+ assert econ['match_score']>general['match_score']>chemistry['match_score'];assert econ['gap_impact']=='HIGH' and chemistry['gap_impact']=='LOW';assert chemistry['eligibility_status']=='NOT_ELIGIBLE'
+ chem_goal=Goal(title='Chemical Engineering',target_field='Chemical Engineering',target_countries='[]',funding_requirement='MEDIUM')
+ process=opportunity_view(p,chem_goal,opp('Process Lab','RESEARCH',['Process Engineering'],['EXPERIENCE']),[gap],{'overall':20});assert process['field_relevance']==100
+
+def test_economics_personalization_integration_and_isolation():
+ h=auth_setup('economics-personalization@example.com')
+ profile={'birth_year':date.today().year-17,'country':'Kazakhstan','city':'','education_level':'HIGH_SCHOOL','grade_year':'12','gpa':3.9,'gpa_scale':4,'english_level':'B2','ielts_score':None,'sat_score':None,'budget_level':'LOW','preferred_countries':['Europe'],'preferred_fields':['Economics'],'skills':[],'interests':['Economics'],'achievements':'none','projects':'none','extracurriculars':'none','volunteering':'none','research_experience':'none','work_experience':'none'}
+ goal={'title':'Economics in Europe','description':'Study Economics bachelor in Europe with substantial funding','goal_type':'UNIVERSITY_ADMISSION','target_field':'Economics','target_countries':['Europe'],'funding_requirement':'HIGH','education_level':'BACHELOR','language':'English'}
+ result=client.post('/api/onboarding/complete',headers=h,json={'profile':profile,'goal':goal});assert result.status_code==200
+ with SessionLocal() as db:
+  for title,typ,fields,cats,restrict in [('Economics Olympiad','COMPETITION',['Economics'],['EXPERIENCE'],False),('Open Global Scholarship','SCHOLARSHIP',['General'],['FINANCIAL'],False),('Chemistry-specific Degree','UNIVERSITY_PROGRAM',['Chemistry'],['ACADEMIC'],True)]:
+   db.add(Opportunity(title=title,provider='Test Demo Dataset',opportunity_type=typ,description='Demo dataset record',country='International',eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',fields=json.dumps(fields),gap_categories=json.dumps(cats),field_restriction=restrict,funding_type='FULL',deadline=date.today()+timedelta(days=90),source_label='Demo dataset'))
+  db.commit()
+ stored=client.get('/api/profile',headers=h).json();assert stored['projects']=='none' and stored['research_experience']=='none' and stored['volunteering']=='none' and stored['extracurriculars']=='none' and stored['ielts_score'] is None and stored['preferred_fields']==['Economics'] and stored['preferred_countries']==['Europe']
+ dash=client.get('/api/dashboard',headers=h).json();assert dash['goal']['target_field']=='Economics' and 'Chemical Engineering' not in dash['goal']['title'] and dash['readiness']['experience']<=20
+ language=next(g for g in dash['gaps'] if g['category']=='LANGUAGE');assert 'exact target depends' in language['target_state'] and '6.5' not in language['target_state']
+ feed=client.get('/api/opportunities',headers=h).json();titles=[o['title'] for o in feed];assert titles.index('Economics Olympiad')<titles.index('Open Global Scholarship') and 'Chemistry-specific Degree' not in titles
+ advice=client.post('/api/ai/advisor',headers=h,json={'question':'find economics olympiads'}).json();assert advice['intent']=='OPPORTUNITY_SEARCH' and 'Economics Olympiad' in advice['answer'] and 'highest-severity gap' not in advice['answer']
+ with SessionLocal() as db:
+  user=db.query(User).filter_by(email='economics-personalization@example.com').one();assert db.query(Goal).filter_by(user_id=user.id).count()==1 and db.query(StudentProfile).filter_by(user_id=user.id).one().achievements=='none'
