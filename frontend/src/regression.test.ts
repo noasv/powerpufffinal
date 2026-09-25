@@ -5,6 +5,7 @@ import{renderToStaticMarkup}from'react-dom/server';
 import{api,formatApiError}from'./api.ts';
 import{destinationAfterAuthentication,establishSession}from'./auth.ts';
 import{ReadinessCard}from'./readiness.ts';
+import{emailSchema,emailValidationState,normalizeEmail}from'./emailValidation.ts';
 
 class MemoryStorage{
  private values=new Map<string,string>();
@@ -41,6 +42,28 @@ test('FastAPI email validation errors are human-readable',()=>{
  assert.equal(message,'Enter a valid email address.');
  assert.doesNotMatch(message,/\[object Object\]/);
  assert.equal(formatApiError({detail:{reason:{message:'Account could not be created'}}}),'Account could not be created');
+});
+
+test('email schema accepts broad valid domains and rejects malformed formats',()=>{
+ for(const email of ['zhans@aya','test@','@test.com','test.com','test@@example.com','user name@example.com'])
+  assert.equal(emailSchema.safeParse(email).success,false,email);
+ for(const email of ['student@example.com','name.surname@gmail.com','student123@school.edu','user+pathly@example.org'])
+  assert.equal(emailSchema.safeParse(email).success,true,email);
+});
+
+test('email feedback responds immediately without an aggressive untouched error',()=>{
+ assert.equal(emailValidationState('',false),'untouched');
+ assert.equal(emailValidationState('zhans@aya',true),'invalid');
+ assert.equal(emailValidationState('zhans@aya.com',true),'valid');
+ assert.equal(normalizeEmail(' User.Name@SCHOOL.EDU '),'User.Name@school.edu');
+});
+
+test('duplicate-account and format errors remain distinct readable strings',()=>{
+ const duplicate=formatApiError({detail:'An account with this email already exists.'});
+ const invalid=formatApiError({detail:[{loc:['body','email'],msg:'value is not a valid email address'}]});
+ assert.equal(duplicate,'An account with this email already exists.');
+ assert.equal(invalid,'Enter a valid email address.');
+ assert.doesNotMatch(`${duplicate} ${invalid}`,/\[object Object\]/);
 });
 
 test('overall readiness card renders the backend value and qualification',()=>{
