@@ -22,7 +22,7 @@ Opportunity lists answer “what exists?” Pathly answers “given my goal and 
 - JWT register/login, protected APIs, Argon2 password hashing, account deletion.
 - Five-step onboarding and editable AI-interpreted structured goals.
 - Requirements, evidence-backed gaps, eligibility, centrally configured match/readiness/impact scoring.
-- 42 meaningful seeded demo opportunities with relative future deadlines and explicit source labels.
+- 50 meaningful seeded demo opportunities with relative future deadlines and explicit source labels.
 - Dashboard with live readiness history/breakdown, path map, search/filter/sort, opportunity detail.
 - Persisted deadline-driven roadmaps and completion actions.
 - Profile changes (including the IELTS demo) recalculate gaps/readiness and preserve snapshots.
@@ -76,7 +76,7 @@ Keys remain backend-only. Real calls use controlled timeout/retry; any provider/
 
 ## Database, migrations, and seed data
 
-`alembic upgrade head` creates all tables. `python -m app.seed` is idempotent and creates the demo user, profile, active goal, requirements, evidence gaps, readiness history, roadmap, and 42 opportunities. Records say **Demo dataset** and use future dates relative to seeding. Always verify source data.
+`alembic upgrade head` creates all tables. `python -m app.seed` is idempotent and creates or updates the demo user, profile, active goal, requirements, evidence gaps, readiness history, roadmap, and 50 canonical opportunities without removing existing users. Eight records are Economics-focused. Records say **Demo dataset** and use future dates relative to seeding. Always verify source data.
 
 ## Algorithms
 
