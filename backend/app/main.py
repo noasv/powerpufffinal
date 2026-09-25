@@ -13,7 +13,8 @@ from .models import *
 from .config.settings import settings
 from .services.engines import *
 from .services.ai import ai
-from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean
+from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean,requested_domains
+from .services.reviewer import ApplicationReview,deterministic_review,rubric_for,validate_provider_review
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 passwords=PasswordHash.recommended();oauth=OAuth2PasswordBearer(tokenUrl='/api/auth/login')
@@ -24,7 +25,7 @@ class ProfileIn(BaseModel):
 class GoalIn(BaseModel): title:str;description:str='';goal_type:str='UNIVERSITY_ADMISSION';target_field:str='';target_countries:list[str]=[];target_date:date|None=None;funding_requirement:str='HIGH';education_level:str='BACHELOR';language:str='English'
 class ParseIn(BaseModel): text:str=Field(min_length=5)
 class AdvisorIn(BaseModel): question:str=Field(min_length=2)
-class ReviewIn(BaseModel): opportunity_id:int;document_type:str='MOTIVATION_LETTER';title:str='Draft';content:str=Field(min_length=20)
+class ReviewIn(BaseModel): opportunity_id:int;document_type:str='MOTIVATION_LETTER';title:str='Draft';content:str=Field(min_length=1)
 class OnboardingIn(BaseModel): profile:ProfileIn;goal:GoalIn
 def token(u):return jwt.encode({'sub':str(u.id),'exp':datetime.utcnow()+timedelta(hours=12)},settings.jwt_secret,algorithm='HS256')
 def current(raw:str=Depends(oauth),db:Session=Depends(get_db)):
@@ -46,7 +47,7 @@ def create_goal_records(db:Session,u:User,x:GoalIn):
  return g
 @app.get('/api/health')
 def health(db:Session=Depends(get_db)):
- db.execute(text('select 1'));return {'status':'ok','database':'ok','ai_provider':'mock' if ai.fallback_active else settings.ai_provider,'demo_ai':ai.fallback_active}
+ db.execute(text('select 1'));return {'status':'ok','database':'ok','configured_provider':ai.configured_provider,'active_provider':ai.provider_name,'fallback_used':ai.last_fallback,'ai_provider':ai.provider_name,'demo_ai':ai.provider_name=='mock'}
 @app.post('/api/auth/register')
 def register(x:Register,db:Session=Depends(get_db)):
  email=str(x.email).strip()
@@ -167,7 +168,7 @@ def dashboard(u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return {'needs_onboarding':True}
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted([v for v in opps if v['eligibility_status']!='NOT_ELIGIBLE' and v['field_relevance']>=35],key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'user':{'name':u.name},'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
-def _advisor_answer(raw, candidates, search_intent):
+def _advisor_answer(raw, candidates, search_intent, domains=None):
  by_id={o['id']:o for o in candidates}
  try:data=json.loads(raw)
  except (TypeError,json.JSONDecodeError):data={'answer':str(raw),'recommendations':[],'general_suggestions':[]}
@@ -188,7 +189,12 @@ def _advisor_answer(raw, candidates, search_intent):
    # A malformed provider response cannot erase verified search results.
    facts=' Stored Pathly opportunities: '+'; '.join(f"{opp['title']} — helps address {', '.join(opp['gap_categories']).lower()}." for opp in candidates[:5])
   else:
-   facts=' No matching VERIFIED/STORED Pathly opportunity is currently available.'
+   facts=" I couldn't find a matching stored opportunity in the current Pathly dataset."
+  if domains:
+   matched={domain for domain in domains if any(field_relevance(domain,opp['fields'])>=70 for opp in candidates)}
+   missing=[domain for domain in domains if domain not in matched]
+   if missing and matched:
+    facts+=f" I found stored {', '.join(sorted(matched))} opportunities, but the current Pathly dataset does not contain a strong {', '.join(missing)} {candidates[0]['type'].lower().replace('_',' ')} match."
   suggestions=[str(x) for x in data.get('general_suggestions',[]) if isinstance(x,str)][:3]
   if suggestions:facts+=' General suggestions (not stored Pathly opportunities): '+'; '.join(suggestions)+'.'
   answer=(answer+' '+facts).strip()
@@ -203,31 +209,43 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  requirements=db.query(Requirement).filter_by(goal_id=g.id).all()
  all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
  context={'user':{'id':u.id,'name':u.name},'profile':profile_dict(p),'goal':{'id':g.id,'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'requirements':[{'category':z.category,'name':z.name,'target':z.target_value,'source_type':z.source_type} for z in requirements],'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state,'evidence':z.evidence} for z in gs if z.status=='OPEN'],'resolved_gaps':[{'title':z.title,'category':z.category} for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':{'title':road.title if road else None,'tasks':[{'title':z.title,'status':z.status,'due_date':str(z.due_date),'opportunity_id':z.opportunity_id} for z in tasks]}}
- question=x.question.lower();requested_type=detect_opportunity_type(question)
+ question=x.question.lower();requested_type=detect_opportunity_type(question);domains=requested_domains(question)
  opportunity_words=('opportunit','olympiad','competition','scholarship','program','extracurricular')
  search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
- requested_field=canonical_domain(question)
- known={'Economics','Finance','Business','Computer Science','Chemical Engineering','Engineering','Mathematics','Social Sciences'}
- if requested_field not in known:requested_field=g.target_field
+ requested_fields=domains or [g.target_field]
  requested_gap='EXTRACURRICULAR' if 'extracurricular' in question else None
  candidates=[]
  for opp,view in zip(all_opps,views):
   if view['eligibility_status']=='NOT_ELIGIBLE':continue
-  if search_intent and field_relevance(requested_field,j(opp.fields))<70:continue
+  relevance=max(field_relevance(field,j(opp.fields)) for field in requested_fields)
+  if search_intent and relevance<70:continue
   if requested_type and opp.opportunity_type!=requested_type:continue
   if requested_gap and requested_gap not in j(opp.gap_categories):continue
-  candidates.append({'id':opp.id,'title':opp.title,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_label':opp.source_label})
- candidates.sort(key=lambda z:z['match_score'],reverse=True);candidates=candidates[:8]
+  candidates.append({'id':opp.id,'title':opp.title,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_label':opp.source_label})
+ candidates.sort(key=lambda z:(z['field_relevance'],z['match_score']),reverse=True);candidates=candidates[:8]
  prompt={'instructions':['Answer the question using only this authenticated user context.','Return JSON with answer, recommendations [{id, reason}], and general_suggestions.','Recommendation ids must come from candidate_opportunities. Do not put opportunity names, URLs, eligibility, or deadlines in answer; the server renders stored facts.','General suggestions must be activity categories, never invented named opportunities, and must be clearly non-Pathly.'],'question':x.question,'context':context,'candidate_opportunities':candidates}
- raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
- answer,ids=_advisor_answer(raw,candidates,search_intent)
+ try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
+ except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt));ai.last_fallback=True;ai.last_active_provider='mock'
+ answer,ids=_advisor_answer(raw,candidates,search_intent,requested_fields if domains else None)
  return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
- if not db.get(Opportunity,x.opportunity_id):raise HTTPException(404,'Opportunity not found')
+ opp=db.get(Opportunity,x.opportunity_id)
+ if not opp:raise HTTPException(404,'Opportunity not found')
  doc=ApplicationDocument(user_id=u.id,**x.model_dump());db.add(doc);db.flush()
- try:data=json.loads(ai.complete('REVIEW '+x.content))
- except:data=json.loads(ai.mock.complete('REVIEW '+x.content))
- rev=DocumentReview(document_id=doc.id,overall_score=data['overall_score'],requirement_coverage=json.dumps(data['requirement_coverage']),strengths=json.dumps(data['strengths']),gaps=json.dumps(data['gaps']),recommendations=json.dumps(data['recommendations']));db.add(rev);g=active(db,u);p=db.query(StudentProfile).filter_by(user_id=u.id).first();sync_gaps(db,u.id,g,p);readiness(db,u.id,g,p);db.commit();return {**data,'id':rev.id,'demo_ai':ai.fallback_active}
+ payload={'opportunity_type':opp.opportunity_type,'requirements':opp.requirements_text,'document_type':x.document_type,'content':x.content,'instructions':'No evidence means no credit. Evidence must be an exact quote from content. Return the required JSON schema only.','criteria':[name for name,_ in rubric_for(opp.opportunity_type,opp.requirements_text)],'json_schema':ApplicationReview.model_json_schema()}
+ baseline=deterministic_review(opp.opportunity_type,opp.requirements_text,x.content)
+ if baseline.review_status=='INSUFFICIENT_CONTENT':data=baseline
+ else:
+  data=None
+  for _ in range(2 if ai.configured_real else 1):
+   try:data=validate_provider_review(ai.complete('REVIEW_JSON '+json.dumps(payload)),x.content,set(payload['criteria']));break
+   except Exception:continue
+  if data is None:data=baseline;ai.last_fallback=ai.configured_real;ai.last_active_provider='mock'
+ serialized=data.model_dump()
+ coverage={criterion['criterion']:criterion['score'] for criterion in serialized['criteria']}
+ rev=DocumentReview(document_id=doc.id,overall_score=serialized['overall_score'] or 0,requirement_coverage=json.dumps(coverage),strengths=json.dumps(serialized['strengths']),gaps=json.dumps(serialized['missing_evidence']),recommendations=json.dumps(serialized['recommendations']));db.add(rev);g=active(db,u);p=db.query(StudentProfile).filter_by(user_id=u.id).first()
+ if g and p:sync_gaps(db,u.id,g,p);readiness(db,u.id,g,p)
+ db.commit();return {**serialized,'id':rev.id,'demo_ai':ai.provider_name=='mock','ai_provider':ai.provider_name}
 @app.get('/api/applications/reviews')
 def reviews(u=Depends(current),db:Session=Depends(get_db)):return db.query(DocumentReview).join(ApplicationDocument).filter(ApplicationDocument.user_id==u.id).all()
