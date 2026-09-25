@@ -13,7 +13,7 @@ from .models import *
 from .config.settings import settings
 from .services.engines import *
 from .services.ai import ai
-from .services.domains import canonical_domain,detect_opportunity_type,field_relevance
+from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 passwords=PasswordHash.recommended();oauth=OAuth2PasswordBearer(tokenUrl='/api/auth/login')
@@ -123,12 +123,17 @@ def opportunities(search:str='',opportunity_type:str='',country:str='',funding:s
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return []
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);q=db.query(Opportunity)
- if search:q=q.filter((Opportunity.title.ilike(f'%{search}%'))|(Opportunity.provider.ilike(f'%{search}%'))|(Opportunity.description.ilike(f'%{search}%')))
  if opportunity_type:q=q.filter_by(opportunity_type=opportunity_type)
  if country:q=q.filter_by(country=country)
  if funding:q=q.filter_by(funding_type=funding)
- data=[opportunity_view(p,g,o,gs,r) for o in q.all()]
- if sort=='recommended': data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE' and x['field_relevance']>=35]
+ records=q.all()
+ if search:
+  needle=clean(search)
+  records=[o for o in records if needle in clean(' '.join((o.title,o.provider,o.description))) or search_matches_domain(search,j(o.fields))]
+ data=[opportunity_view(p,g,o,gs,r) for o in records]
+ # Search operates on the eligible universe; recommendation thresholds only shape feeds.
+ if search:data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE']
+ elif sort=='recommended':data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE' and x['field_relevance']>=35]
  key={'readiness':'readiness_score','deadline':'deadline','impact':'gap_impact_score'}.get(sort,'match_score');return sorted(data,key=lambda x:(x[key] is not None,x[key]),reverse=sort!='deadline')
 @app.get('/api/opportunities/{oid}')
 def opportunity(oid:int,u=Depends(current),db:Session=Depends(get_db)):
@@ -160,44 +165,61 @@ def dashboard(u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return {'needs_onboarding':True}
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);opps=[opportunity_view(p,g,o,gs,r) for o in db.query(Opportunity).all()];opps=sorted([v for v in opps if v['eligibility_status']!='NOT_ELIGIBLE' and v['field_relevance']>=35],key=lambda x:x['match_score'],reverse=True)[:5];road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first();tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).order_by(RoadmapTask.due_date).limit(6).all() if road else [];hist=db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).order_by(ReadinessSnapshot.created_at).all();return {'user':{'name':u.name},'goal':g,'profile':profile_dict(p),'readiness':r,'gaps':[x for x in gs if x.status!='RESOLVED'],'opportunities':opps,'tasks':tasks,'history':hist,'demo_ai':ai.fallback_active}
+def _advisor_answer(raw, candidates, search_intent):
+ by_id={o['id']:o for o in candidates}
+ try:data=json.loads(raw)
+ except (TypeError,json.JSONDecodeError):data={'answer':str(raw),'recommendations':[],'general_suggestions':[]}
+ answer=str(data.get('answer','')).strip()
+ verified=[]
+ for item in data.get('recommendations',[]):
+  try:opp=by_id.get(int(item.get('id')))
+  except (TypeError,ValueError,AttributeError):opp=None
+  if opp and opp['id'] not in {x[0]['id'] for x in verified}:
+   verified.append((opp,str(item.get('reason','')).strip()))
+ if search_intent:
+  # Never surface free-form provider text as a stored opportunity fact. The model
+  # selects database ids; titles and other facts are rendered exclusively here.
+  answer='I matched your question against the eligible Pathly opportunity catalogue.'
+  if verified:
+   facts=' Stored Pathly opportunities: '+'; '.join(f"{opp['title']} — {reason or 'helps address '+', '.join(opp['gap_categories']).lower()}" for opp,reason in verified)+'.'
+  elif candidates:
+   # A malformed provider response cannot erase verified search results.
+   facts=' Stored Pathly opportunities: '+'; '.join(f"{opp['title']} — helps address {', '.join(opp['gap_categories']).lower()}." for opp in candidates[:5])
+  else:
+   facts=' No matching VERIFIED/STORED Pathly opportunity is currently available.'
+  suggestions=[str(x) for x in data.get('general_suggestions',[]) if isinstance(x,str)][:3]
+  if suggestions:facts+=' General suggestions (not stored Pathly opportunities): '+'; '.join(suggestions)+'.'
+  answer=(answer+' '+facts).strip()
+ return answer, [opp['id'] for opp,_ in verified] or ([o['id'] for o in candidates[:5]] if search_intent else [])
+
 @app.post('/api/ai/advisor')
 def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:raise HTTPException(409,'Complete onboarding before using the advisor')
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first()
- tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else [];saved_ids={t.opportunity_id for t in tasks if t.opportunity_id};saved=db.query(Opportunity).filter(Opportunity.id.in_(saved_ids)).all() if saved_ids else []
+ tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else []
+ requirements=db.query(Requirement).filter_by(goal_id=g.id).all()
  all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
- context={'profile':profile_dict(p),'goal':{'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state} for z in gs if z.status=='OPEN'],'resolved_gaps':[z.title for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':[{'title':z.title,'status':z.status,'due_date':str(z.due_date)} for z in tasks],'saved_opportunities':[z.title for z in saved],'todo_tasks':[z.title for z in tasks if z.status in ('TODO','IN_PROGRESS')][:8],'relevant_opportunities':[{'title':v['title'],'type':v['opportunity_type'],'match':v['match_score'],'eligibility':v['eligibility_status'],'deadline':str(v['deadline'])} for v in sorted(views,key=lambda v:v['match_score'],reverse=True)[:8]]}
- question=x.question.lower(); requested_type=detect_opportunity_type(question)
- search_intent=any(term in question for term in ('find','search','recommend','show me','opportunities','olympiad','scholarship','program'))
- if search_intent:
-  requested_field=canonical_domain(question)
-  # If no known field was expressed, use the active goal rather than inventing one.
-  if requested_field not in {'Economics','Computer Science','Chemical Engineering','Engineering','Mathematics','Social Sciences'}: requested_field=g.target_field
-  matches=[]
-  for opp,view in zip(all_opps,views):
-   if requested_type and opp.opportunity_type!=requested_type: continue
-   if field_relevance(requested_field,j(opp.fields))<75 or view['eligibility_status']=='NOT_ELIGIBLE': continue
-   matches.append((view['match_score'],opp))
-  matches.sort(key=lambda pair:pair[0],reverse=True)
-  if not matches: answer="I couldn't find a matching opportunity in the current Pathly dataset."
-  else: answer='I found these stored opportunities: '+ '; '.join(f'{o.title} ({o.opportunity_type.replace("_"," ").title()}, deadline {o.deadline.isoformat() if o.deadline else "not stored"})' for _,o in matches[:5])+'. These names and deadlines come from the Demo dataset; verify them at the stored source.'
-  return {'answer':answer,'intent':'OPPORTUNITY_SEARCH','opportunity_ids':[o.id for _,o in matches[:5]],'demo_ai':ai.fallback_active}
- if ai.fallback_active:
-  open_gaps=context['open_gaps'];top=open_gaps[0] if open_gaps else None
-  if 'readiness' in question:
-   return {'answer':f"Your overall preparedness heuristic is {r['overall']}%. Academic: {r['academic']}%, language: {r['language']}%, experience: {r['experience']}%, extracurricular: {r['extracurricular']}%, financial: {r['financial']}%, application: {r['application']}%. This is not an admission probability.",'intent':'READINESS','demo_ai':True}
-  if 'gap' in question or 'missing' in question:
-   answer='Your open gaps are: '+('; '.join(f"{z['title']} ({z['severity']})" for z in open_gaps) if open_gaps else 'none currently identified')+'.'
-   return {'answer':answer,'intent':'GAPS','demo_ai':True}
-  if 'roadmap' in question or 'plan' in question:
-   return {'answer':'Your next roadmap steps are: '+('; '.join(context['todo_tasks'][:5]) if context['todo_tasks'] else 'no incomplete stored tasks')+'.','intent':'ROADMAP','demo_ai':True}
-  if 'compare' in question or ' versus ' in question or ' vs ' in question:
-   names=[v for v in context['relevant_opportunities'] if v['title'].lower() in question]
-   return {'answer':('Stored comparison: '+'; '.join(f"{v['title']} — match {v['match']}%, {v['eligibility']}" for v in names)) if len(names)>=2 else 'Name two stored opportunities from your feed so I can compare their match and eligibility.','intent':'COMPARISON','demo_ai':True}
-  if 'profile' in question or 'improve' in question:
-   return {'answer':f"Improve your profile with real evidence for your highest open gap: {top['title'] if top else 'keep existing evidence current'}. Do not add activities you cannot substantiate.",'intent':'PROFILE_IMPROVEMENT','demo_ai':True}
- return {'answer':ai.complete('ADVISOR_CONTEXT '+json.dumps(context)+' QUESTION '+x.question),'intent':'GUIDANCE','demo_ai':ai.fallback_active}
+ context={'user':{'id':u.id,'name':u.name},'profile':profile_dict(p),'goal':{'id':g.id,'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'requirements':[{'category':z.category,'name':z.name,'target':z.target_value,'source_type':z.source_type} for z in requirements],'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state,'evidence':z.evidence} for z in gs if z.status=='OPEN'],'resolved_gaps':[{'title':z.title,'category':z.category} for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':{'title':road.title if road else None,'tasks':[{'title':z.title,'status':z.status,'due_date':str(z.due_date),'opportunity_id':z.opportunity_id} for z in tasks]}}
+ question=x.question.lower();requested_type=detect_opportunity_type(question)
+ opportunity_words=('opportunit','olympiad','competition','scholarship','program','extracurricular')
+ search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
+ requested_field=canonical_domain(question)
+ known={'Economics','Finance','Business','Computer Science','Chemical Engineering','Engineering','Mathematics','Social Sciences'}
+ if requested_field not in known:requested_field=g.target_field
+ requested_gap='EXTRACURRICULAR' if 'extracurricular' in question else None
+ candidates=[]
+ for opp,view in zip(all_opps,views):
+  if view['eligibility_status']=='NOT_ELIGIBLE':continue
+  if search_intent and field_relevance(requested_field,j(opp.fields))<70:continue
+  if requested_type and opp.opportunity_type!=requested_type:continue
+  if requested_gap and requested_gap not in j(opp.gap_categories):continue
+  candidates.append({'id':opp.id,'title':opp.title,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_label':opp.source_label})
+ candidates.sort(key=lambda z:z['match_score'],reverse=True);candidates=candidates[:8]
+ prompt={'instructions':['Answer the question using only this authenticated user context.','Return JSON with answer, recommendations [{id, reason}], and general_suggestions.','Recommendation ids must come from candidate_opportunities. Do not put opportunity names, URLs, eligibility, or deadlines in answer; the server renders stored facts.','General suggestions must be activity categories, never invented named opportunities, and must be clearly non-Pathly.'],'question':x.question,'context':context,'candidate_opportunities':candidates}
+ raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
+ answer,ids=_advisor_answer(raw,candidates,search_intent)
+ return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
  if not db.get(Opportunity,x.opportunity_id):raise HTTPException(404,'Opportunity not found')

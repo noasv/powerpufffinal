@@ -107,6 +107,8 @@ def test_normalized_field_ranking_and_gap_specific_impact():
  econ=opportunity_view(p,g,opp('Economics Olympiad','COMPETITION',['Economics'],['EXPERIENCE']),[gap],{'overall':20})
  general=opportunity_view(p,g,opp('General Scholarship','SCHOLARSHIP',['General'],['FINANCIAL']),[gap],{'overall':20})
  chemistry=opportunity_view(p,g,opp('Chemistry Degree','UNIVERSITY_PROGRAM',['Chemistry'],['ACADEMIC'],True),[gap],{'overall':20})
+ finance=opportunity_view(p,g,opp('Finance Challenge','COMPETITION',['Finance'],['EXPERIENCE']),[gap],{'overall':20})
+ assert econ['match_score']>finance['match_score']>chemistry['match_score'];assert finance['field_relevance']==70
  assert econ['match_score']>general['match_score']>chemistry['match_score'];assert econ['gap_impact']=='HIGH' and chemistry['gap_impact']=='LOW';assert chemistry['eligibility_status']=='NOT_ELIGIBLE'
  chem_goal=Goal(title='Chemical Engineering',target_field='Chemical Engineering',target_countries='[]',funding_requirement='MEDIUM')
  process=opportunity_view(p,chem_goal,opp('Process Lab','RESEARCH',['Process Engineering'],['EXPERIENCE']),[gap],{'overall':20});assert process['field_relevance']==100
@@ -127,3 +129,80 @@ def test_economics_personalization_integration_and_isolation():
  advice=client.post('/api/ai/advisor',headers=h,json={'question':'find economics olympiads'}).json();assert advice['intent']=='OPPORTUNITY_SEARCH' and 'Economics Olympiad' in advice['answer'] and 'highest-severity gap' not in advice['answer']
  with SessionLocal() as db:
   user=db.query(User).filter_by(email='economics-personalization@example.com').one();assert db.query(Goal).filter_by(user_id=user.id).count()==1 and db.query(StudentProfile).filter_by(user_id=user.id).one().achievements=='none'
+
+def economics_user(email='economics-search@example.com'):
+ h=auth_setup(email)
+ profile={'birth_year':date.today().year-19,'country':'Kazakhstan','city':'','education_level':'BACHELOR','grade_year':'1','gpa':3.8,'gpa_scale':4,'english_level':'B2','ielts_score':None,'sat_score':None,'budget_level':'MEDIUM','preferred_countries':['International'],'preferred_fields':['Economics'],'skills':[],'interests':['Economics'],'achievements':'','projects':'','extracurriculars':'','volunteering':'','research_experience':'','work_experience':''}
+ goal={'title':'Economics Abroad','target_field':'Economics','target_countries':['International'],'funding_requirement':'MEDIUM','education_level':'BACHELOR','language':'English'}
+ assert client.post('/api/onboarding/complete',headers=h,json={'profile':profile,'goal':goal}).status_code==200
+ return h
+
+def test_economics_search_aliases_and_recommendation_safety():
+ from app.seed import seed
+ seed();h=economics_user()
+ economics=client.get('/api/opportunities',headers=h,params={'search':'economics'}).json()
+ economy=client.get('/api/opportunities',headers=h,params={'search':'economy'}).json()
+ assert len(economics)>=7 and {o['id'] for o in economics}=={o['id'] for o in economy}
+ assert all(o['eligibility_status']=='ELIGIBLE' for o in economics)
+ feed=client.get('/api/opportunities',headers=h).json()
+ econ_positions=[i for i,o in enumerate(feed) if 'Economics' in o['title']]
+ chemistry_positions=[i for i,o in enumerate(feed) if 'Chemistry' in o['title']]
+ assert econ_positions and (not chemistry_positions or min(econ_positions)<min(chemistry_positions))
+ assert not any(o['title']=='European Chemical Engineering BSc' for o in feed)
+
+def test_seed_updates_existing_database_without_deleting_users():
+ from app.seed import seed,ECONOMICS_OPPORTUNITIES
+ h=auth_setup('persistent-user@example.com')
+ with SessionLocal() as db:
+  existing=db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Demo dataset').first()
+  if existing:db.delete(existing)
+  users=db.query(User).count();db.commit()
+ seed()
+ with SessionLocal() as db:
+  assert db.query(User).count()>=users  # seed may add the demo account, never removes existing users
+  assert db.query(User).filter_by(email='persistent-user@example.com').one()
+  assert db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Demo dataset').one()
+
+def test_advisor_returns_stored_economics_and_rejects_invented_record(monkeypatch):
+ from app.main import ai
+ from app.seed import seed
+ seed();h=economics_user('advisor-economics@example.com')
+ real_complete=ai.complete
+ try:
+  monkeypatch.setattr(ai,'complete',lambda _:json.dumps({'answer':'Apply to Invented Nobel Economics Camp by Friday.','recommendations':[{'id':999999,'reason':'Guaranteed admission'}],'general_suggestions':['join a school economics club']}))
+  response=client.post('/api/ai/advisor',headers=h,json={'question':'find some economics extracurriculars'}).json()
+ finally:monkeypatch.setattr(ai,'complete',real_complete)
+ assert 'Student Economics Society Project' in response['answer']
+ assert 'Invented Nobel Economics Camp' not in response['answer']
+ assert 'General suggestions (not stored Pathly opportunities)' in response['answer']
+
+def test_ai_provider_selection_and_real_call(monkeypatch):
+ from app.config.settings import settings
+ from app.services.ai import ResilientAIProvider
+ monkeypatch.setattr(settings,'ai_provider','mock');monkeypatch.setattr(settings,'ai_api_key','')
+ mock=ResilientAIProvider();assert mock.fallback_active and mock.complete('anything')
+ monkeypatch.setattr(settings,'ai_provider','openai');monkeypatch.setattr(settings,'ai_api_key','server-secret')
+ monkeypatch.setattr(settings,'ai_model','test-model');monkeypatch.setattr(settings,'ai_base_url','https://provider.test/v1')
+ called={}
+ class Response:
+  def raise_for_status(self):pass
+  def json(self):return {'choices':[{'message':{'content':'{"answer":"real","recommendations":[],"general_suggestions":[]}'}}]}
+ def post(url,**kwargs):called.update(url=url,**kwargs);return Response()
+ monkeypatch.setattr('app.services.ai.httpx.post',post)
+ real=ResilientAIProvider();assert not real.fallback_active
+ assert json.loads(real.complete('ADVISOR_JSON {}'))['answer']=='real'
+ assert called['headers']['Authorization']=='Bearer server-secret' and called['json']['model']=='test-model'
+ assert not real.fallback_active
+
+def test_advisor_context_is_authenticated_user(monkeypatch):
+ from app.main import ai
+ h=economics_user('context-owner@example.com');captured={}
+ def complete(prompt):
+  captured.update(json.loads(prompt.split('ADVISOR_JSON ',1)[1]));return json.dumps({'answer':'ok','recommendations':[],'general_suggestions':[]})
+ monkeypatch.setattr(ai,'complete',complete)
+ client.post('/api/ai/advisor',headers=h,json={'question':'Why is my experience readiness 0?'})
+ assert captured['context']['user']['name']=='Test User'
+ assert captured['context']['goal']['field']=='Economics'
+ assert captured['context']['readiness']['experience']==0
+ assert captured['context']['readiness']['extracurricular']==0
+ assert captured['context']['user']['name']!='Aruzhan Demo'

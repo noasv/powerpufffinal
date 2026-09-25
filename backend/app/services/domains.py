@@ -3,7 +3,9 @@ import re
 # One maintained vocabulary is used by goal parsing, search, and recommendation scoring.
 # Aliases are intentionally broader than the current demo records.
 DOMAIN_ALIASES = {
-    "Economics": {"economics", "economy", "economic policy", "econometrics", "finance", "business", "entrepreneurship", "commerce"},
+    "Economics": {"economics", "economy", "economic", "economic policy", "econometrics"},
+    "Finance": {"finance", "financial markets", "investment", "banking"},
+    "Business": {"business", "entrepreneurship", "commerce", "management"},
     "Computer Science": {"computer science", "computing", "software", "programming", "artificial intelligence", "ai", "machine learning", "data science", "cybersecurity"},
     "Chemical Engineering": {"chemical engineering", "process engineering", "chemistry", "green chemistry", "materials science", "biotechnology"},
     "Engineering": {"engineering", "mechanical engineering", "electrical engineering", "civil engineering", "environmental engineering", "energy engineering"},
@@ -44,11 +46,20 @@ def field_relevance(goal_field: str, opportunity_fields: list[str]) -> int:
         return 75
     if goal in offered:
         return 100
+    # Adjacent commercial disciplines are relevant, but not direct field matches.
+    commercial = {"Economics", "Finance", "Business"}
+    if goal in commercial and offered.intersection(commercial):
+        return 70
     # Adjacent STEM domains receive partial credit, never the score of a direct match.
     adjacent = {"Chemical Engineering", "Engineering", "Mathematics", "Computer Science"}
     if goal in adjacent and offered.intersection(adjacent):
         return 35
     return 5
+
+def search_matches_domain(search: str, opportunity_fields: list[str]) -> bool:
+    """Match a recognized search alias against structured opportunity metadata."""
+    searched = canonical_domain(search)
+    return searched in DOMAIN_ALIASES and field_relevance(searched, opportunity_fields) >= 70
 
 def detect_opportunity_type(text: str) -> str | None:
     value = clean(text)

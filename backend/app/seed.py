@@ -6,6 +6,39 @@ from .services.engines import sync_gaps,readiness,generate_roadmap
 from pwdlib import PasswordHash
 TYPES=['SCHOLARSHIP']*10+['UNIVERSITY_PROGRAM']*8+['COMPETITION']*5+['RESEARCH']*5+['INTERNSHIP']*3+['VOLUNTEERING']*2+['COURSE']*3+['LANGUAGE_PROGRAM']*2+['SUMMER_SCHOOL']*2+['EXCHANGE']*2
 NAMES=['Global Scholars Award','Future Engineers Scholarship','International Merit Grant','STEM Access Scholarship','Community Leaders Award','Women in Science Grant','Sustainable Futures Scholarship','Academic Excellence Fund','Global Citizens Grant','Innovation Scholarship','European Chemical Engineering BSc','Sustainable Process Engineering','International Engineering Bachelor','Applied Chemistry Program','Materials Science BSc','Environmental Engineering Degree','Biotechnology Bachelor','Energy Engineering Program','International Chemistry Olympiad Prep','Young Innovators Challenge','Global Science Competition','Math Modeling Challenge','Sustainability Case Competition','Chemical Research Summer Lab','European Research Academy','Materials Discovery Summer School','Student Science Fellowship','Green Chemistry Lab Program','Engineering Virtual Internship','STEM Industry Internship','Social Impact Internship','Global Volunteer Network','Science Outreach Volunteers','Academic Writing Course','Data Skills for Scientists','Project Design Fundamentals','IELTS Preparation Path','English for University','Engineering Summer School','Science Leadership Summer School','European Student Exchange','Global STEM Exchange']
+ECONOMICS_OPPORTUNITIES = [
+ ('International Economics Olympiad Prep','COMPETITION',['Economics'],['EXPERIENCE','EXTRACURRICULAR']),
+ ('Youth Economics Policy Challenge','COMPETITION',['Economics'],['EXPERIENCE','EXTRACURRICULAR']),
+ ('Economics and Finance Summer Institute','SUMMER_SCHOOL',['Economics','Finance'],['ACADEMIC','EXPERIENCE']),
+ ('Economics Research Academy','RESEARCH',['Economics'],['EXPERIENCE']),
+ ('Future Finance Case Competition','COMPETITION',['Finance','Business','Economics'],['EXPERIENCE','EXTRACURRICULAR']),
+ ('Student Economics Society Project','VOLUNTEERING',['Economics'],['EXTRACURRICULAR']),
+ ('Foundations of Economics Online Course','COURSE',['Economics'],['ACADEMIC']),
+ ('Global Business Scholars Award','SCHOLARSHIP',['General','Economics','Business'],['FINANCIAL']),
+]
+
+def _opportunity_values(typ,fields,cats,index):
+ return {'provider':'Pathly Demo Dataset','opportunity_type':typ,'description':f'A structured {typ.lower().replace("_"," ")} for motivated international students. This is a Demo dataset record, not a verified live listing.','official_url':'https://example.org/pathly-demo','country':'International','delivery_mode':'ONLINE','min_age':16,'max_age':24,'eligible_countries':json.dumps(['International']),'education_levels':json.dumps(['HIGH_SCHOOL','BACHELOR']),'fields':json.dumps(fields),'field_restriction':typ=='UNIVERSITY_PROGRAM','funding_type':'FULL' if typ=='SCHOLARSHIP' else 'PARTIAL','funding_amount_text':'Demo funding; verify with source','language_requirements':'English B2','deadline':date.today()+timedelta(days=60+index*3),'start_date':date.today()+timedelta(days=100+index*3),'requirements_text':'Demo requirements: academic record, motivation statement, and relevant evidence. Verify before applying.','verified_at':None,'source_label':'Demo dataset','gap_categories':json.dumps(cats)}
+
+def upsert_canonical_opportunities(db):
+ """Version the Demo catalogue in-place without deleting users or user data."""
+ catalogue=[]
+ for name,typ in zip(NAMES,TYPES):
+  lower=name.lower()
+  cats=['EXPERIENCE'] if typ in ('RESEARCH','INTERNSHIP','COMPETITION','SUMMER_SCHOOL') else ['LANGUAGE'] if typ in ('LANGUAGE_PROGRAM','COURSE') and ('english' in lower or 'ielts' in lower) else ['FINANCIAL'] if typ=='SCHOLARSHIP' else ['ACADEMIC']
+  if any(x in lower for x in ('ai ','coding','data skills')):fields=['Computer Science']
+  elif typ=='SCHOLARSHIP' or any(x in lower for x in ('volunteer','academic writing','english','ielts')):fields=['General']
+  elif any(x in lower for x in ('chemical','chemistry','process','materials','biotechnology')):fields=['Chemical Engineering']
+  else:fields=['Engineering']
+  catalogue.append((name,typ,fields,cats))
+ catalogue.extend(ECONOMICS_OPPORTUNITIES)
+ for i,(name,typ,fields,cats) in enumerate(catalogue):
+  # Title plus the explicit source label is the stable canonical key.
+  opp=db.query(Opportunity).filter_by(title=name,source_label='Demo dataset').first()
+  if not opp:opp=Opportunity(title=name,source_label='Demo dataset');db.add(opp)
+  for key,value in _opportunity_values(typ,fields,cats,i).items():setattr(opp,key,value)
+ db.flush()
+
 def seed():
  Base.metadata.create_all(engine);db=SessionLocal()
  try:
@@ -22,17 +55,7 @@ def seed():
   g.title='Chemical Engineering in Europe';g.description='Study Chemical Engineering in Europe in English with substantial financial support.';g.target_field='Chemical Engineering';g.target_countries=json.dumps(['Germany','Netherlands']);g.funding_requirement='HIGH';g.education_level='BACHELOR';g.language='English';g.target_date=date.today()+timedelta(days=365);g.status='ACTIVE'
   if not db.query(Requirement).filter_by(goal_id=g.id).first():
    for cat,n,t in [('ACADEMIC','Strong STEM grades','3.2 GPA'),('LANGUAGE','English certification','IELTS 6.5'),('EXPERIENCE','Research evidence','One project'),('APPLICATION','Motivation letter','Complete draft'),('FINANCIAL','Funding plan','Full or substantial funding')]:db.add(Requirement(goal_id=g.id,category=cat,name=n,description=f'Evidence required: {n}',target_value=t))
-  if db.query(Opportunity).count()==0:
-   catalogue=list(zip(NAMES,TYPES))+[('International Economics Olympiad Prep','COMPETITION'),('Youth Economics Policy Challenge','COMPETITION'),('Economics Research Academy','RESEARCH'),('Future Finance Case Competition','COMPETITION'),('Global Business Scholars Award','SCHOLARSHIP'),('AI Research Summer Lab','RESEARCH'),('International Coding Challenge','COMPETITION'),('Community Leadership Volunteer Corps','VOLUNTEERING')]
-   for i,(name,typ) in enumerate(catalogue):
-    cats=['EXPERIENCE'] if typ in ('RESEARCH','INTERNSHIP','COMPETITION','SUMMER_SCHOOL') else ['LANGUAGE'] if typ in ('LANGUAGE_PROGRAM','COURSE') and 'English' in name or 'IELTS' in name else ['FINANCIAL'] if typ=='SCHOLARSHIP' else ['ACADEMIC']
-    lower=name.lower()
-    if any(x in lower for x in ('economics','finance','business')): fields=['Economics','Finance','Business']
-    elif any(x in lower for x in ('ai ','coding','data skills')): fields=['Computer Science','AI','Data Science']
-    elif typ=='SCHOLARSHIP' or any(x in lower for x in ('volunteer','academic writing','english','ielts')): fields=['General']
-    elif any(x in lower for x in ('chemical','chemistry','process','materials','biotechnology')): fields=['Chemical Engineering','Chemistry','Materials Science']
-    else: fields=['Engineering','Science']
-    db.add(Opportunity(title=name,provider=f'Pathly Demo Partner {i+1}',opportunity_type=typ,description=f'A structured {typ.lower().replace("_"," ")} for motivated international students, included in the Demo dataset.',official_url='https://example.org/pathly-demo',country='International' if i%3 else 'Germany',delivery_mode='ONLINE' if i%2 else 'IN_PERSON',min_age=16,max_age=24,eligible_countries=json.dumps(['International']),education_levels=json.dumps(['HIGH_SCHOOL','BACHELOR']),fields=json.dumps(fields),field_restriction=typ=='UNIVERSITY_PROGRAM',funding_type='FULL' if typ=='SCHOLARSHIP' else 'PARTIAL',funding_amount_text='Demo funding; verify with source',language_requirements='English B2',deadline=date.today()+timedelta(days=45+i*3),start_date=date.today()+timedelta(days=90+i*3),requirements_text='Academic record, motivation statement, and evidence relevant to the program.',verified_at=date.today(),gap_categories=json.dumps(cats)))
+  upsert_canonical_opportunities(db)
   sync_gaps(db,u.id,g,p)
   if not db.query(ReadinessSnapshot).filter_by(user_id=u.id,goal_id=g.id).first():readiness(db,u.id,g,p)
   generate_roadmap(db,u,g);db.commit();print(f'Seed complete: {db.query(Opportunity).count()} opportunities, demo user {u.email}')
