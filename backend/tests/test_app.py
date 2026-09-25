@@ -11,6 +11,20 @@ client=TestClient(app)
 def auth_setup(email='test@example.com'):
  r=client.post('/api/auth/register',json={'name':'Test User','email':email,'password':'Password1!','country':'Kazakhstan'});assert r.status_code==200
  return {'Authorization':'Bearer '+r.json()['access_token']}
+
+def test_auth_email_format_duplicate_and_enumeration_safety():
+ invalid=['zhans@aya','test@','@test.com','test.com','test@.com','test@example.','test@@example.com','user name@example.com','@example.com']
+ for email in invalid:
+  assert client.post('/api/auth/register',json={'name':'Test User','email':email,'password':'Password1!','country':'Kazakhstan'}).status_code==422
+  assert client.post('/api/auth/login',json={'email':email,'password':'Password1!'}).status_code==422
+ for i,email in enumerate(['student@example.com','name.surname@gmail.com','student123@school.edu','user+pathly@example.org']):
+  assert client.post('/api/auth/register',json={'name':'Test User','email':email,'password':'Password1!','country':'Kazakhstan'}).status_code==200
+ duplicate=client.post('/api/auth/register',json={'name':'Test User','email':'student@example.com','password':'Password1!','country':'Kazakhstan'})
+ assert duplicate.status_code==409 and duplicate.json()['detail']=='An account with this email already exists.'
+ unknown=client.post('/api/auth/login',json={'email':'unknown@example.com','password':'Password1!'})
+ wrong=client.post('/api/auth/login',json={'email':'student@example.com','password':'WrongPassword!'})
+ assert unknown.status_code==wrong.status_code==401
+ assert unknown.json()['detail']==wrong.json()['detail']=='Incorrect email or password'
 def test_auth_profile_goal_recalculation_flow():
  h=auth_setup(); assert client.get('/api/auth/me',headers=h).status_code==200
  p={'birth_year':2009,'country':'Kazakhstan','education_level':'HIGH_SCHOOL','grade_year':'11','gpa':3.5,'gpa_scale':4,'english_level':'B2','ielts_score':None,'budget_level':'LOW','preferred_countries':['Germany'],'preferred_fields':['Engineering'],'skills':[],'interests':[],'achievements':'','extracurriculars':'club','volunteering':'','research_experience':'','work_experience':'','city':'','sat_score':None}

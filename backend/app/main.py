@@ -7,7 +7,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel,EmailStr,Field
 from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
-from sqlalchemy import text
+from sqlalchemy import text,func
 from .database import Base,engine,get_db
 from .models import *
 from .config.settings import settings
@@ -49,11 +49,13 @@ def health(db:Session=Depends(get_db)):
  db.execute(text('select 1'));return {'status':'ok','database':'ok','ai_provider':'mock' if ai.fallback_active else settings.ai_provider,'demo_ai':ai.fallback_active}
 @app.post('/api/auth/register')
 def register(x:Register,db:Session=Depends(get_db)):
- if db.query(User).filter_by(email=x.email.lower()).first():raise HTTPException(409,'Email already registered')
- u=User(name=x.name,email=x.email.lower(),password_hash=passwords.hash(x.password),country=x.country);db.add(u);db.commit();return {'access_token':token(u),'token_type':'bearer','user':{'id':u.id,'name':u.name,'email':u.email}}
+ email=str(x.email).strip()
+ if db.query(User).filter(func.lower(User.email)==email.lower()).first():raise HTTPException(409,'An account with this email already exists.')
+ u=User(name=x.name,email=email,password_hash=passwords.hash(x.password),country=x.country);db.add(u);db.commit();return {'access_token':token(u),'token_type':'bearer','user':{'id':u.id,'name':u.name,'email':u.email}}
 @app.post('/api/auth/login')
 def login(x:Login,db:Session=Depends(get_db)):
- u=db.query(User).filter_by(email=x.email.lower()).first()
+ email=str(x.email).strip()
+ u=db.query(User).filter(func.lower(User.email)==email.lower()).first()
  if not u or not passwords.verify(x.password,u.password_hash):raise HTTPException(401,'Incorrect email or password')
  return {'access_token':token(u),'token_type':'bearer','user':{'id':u.id,'name':u.name,'email':u.email}}
 @app.get('/api/auth/me')
