@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     ai_api_key: str = ""
     ai_model: str = "gpt-4o-mini"
     ai_base_url: str = "https://api.openai.com/v1"
+    ai_timeout_seconds: float = 12.0
     frontend_url: str = "http://localhost:5173"
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 settings=Settings()

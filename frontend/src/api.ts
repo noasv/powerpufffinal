@@ -41,4 +41,15 @@ export async function api<T>(path:string,options:RequestInit={}):Promise<T>{
  if(r.status===204)return undefined as T;
  return r.json();
 }
+
+/** Ensures an interactive request cannot leave the UI pending forever. */
+export async function apiWithTimeout<T>(path:string,options:RequestInit={},timeoutMs=20_000):Promise<T>{
+ const controller=new AbortController();
+ const timer=setTimeout(()=>controller.abort(),timeoutMs);
+ try{return await api<T>(path,{...options,signal:controller.signal})}
+ catch(error){
+  if(controller.signal.aborted)throw new Error('The advisor took too long to respond. Please try again.');
+  throw error;
+ }finally{clearTimeout(timer)}
+}
 export type Opportunity={id:number;title:string;provider:string;opportunity_type:string;description:string;country:string;funding_type:string;deadline:string;match_score:number;readiness_score:number;gap_impact:string;eligibility_status:string;explanation:string;impacts:{title:string;strength:string;reason:string}[];official_url:string;source_label:string;requirements_text:string;eligibility_reasons:string[]}

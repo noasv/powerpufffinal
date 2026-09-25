@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import React from 'react';
 import{renderToStaticMarkup}from'react-dom/server';
-import{api,formatApiError}from'./api.ts';
+import{api,apiWithTimeout,formatApiError}from'./api.ts';
 import{destinationAfterAuthentication,establishSession}from'./auth.ts';
 import{ReadinessCard}from'./readiness.ts';
 import{emailSchema,emailValidationState,normalizeEmail}from'./emailValidation.ts';
@@ -71,4 +71,12 @@ test('overall readiness card renders the backend value and qualification',()=>{
  assert.match(html,/OVERALL READINESS/);
  assert.match(html,/69\.5%/);
  assert.match(html,/Preparedness heuristic/);
+});
+
+test('interactive advisor requests time out instead of remaining pending',async()=>{
+ Object.defineProperty(globalThis,'localStorage',{value:new MemoryStorage(),configurable:true});
+ globalThis.fetch=async(_input,init)=>new Promise((_resolve,reject)=>{
+  init?.signal?.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError')));
+ });
+ await assert.rejects(()=>apiWithTimeout('/ai/advisor',{method:'POST'},5),/took too long/i);
 });

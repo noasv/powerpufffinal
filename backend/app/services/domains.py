@@ -7,7 +7,9 @@ DOMAIN_ALIASES = {
     "Finance": {"finance", "financial markets", "investment", "banking"},
     "Business": {"business", "entrepreneurship", "commerce", "management"},
     "Computer Science": {"computer science", "computing", "software", "programming", "artificial intelligence", "ai", "machine learning", "data science", "cybersecurity"},
-    "Chemical Engineering": {"chemical engineering", "process engineering", "chemistry", "green chemistry", "materials science", "biotechnology"},
+    "Chemistry": {"chemistry", "green chemistry", "organic chemistry", "inorganic chemistry", "geochemistry"},
+    "Geography": {"geography", "geographic", "human geography", "physical geography"},
+    "Chemical Engineering": {"chemical engineering", "process engineering", "materials science", "biotechnology"},
     "Engineering": {"engineering", "mechanical engineering", "electrical engineering", "civil engineering", "environmental engineering", "energy engineering"},
     "Mathematics": {"mathematics", "math", "statistics", "mathematical modeling"},
     "Social Sciences": {"social science", "political science", "international relations", "public policy", "sociology"},
@@ -36,6 +38,15 @@ def canonical_domain(value: str) -> str:
     name, length = max(matches, key=lambda item: item[1])
     return name if length else value.title()
 
+def requested_domains(value: str) -> list[str]:
+    """Return every explicit domain in a query, including slash-separated domains."""
+    normalized = clean(value)
+    found = []
+    for name, aliases in DOMAIN_ALIASES.items():
+        if any(re.search(rf"\b{re.escape(clean(alias))}\b", normalized) for alias in aliases):
+            found.append(name)
+    return found
+
 def domain_set(values) -> set[str]:
     return {canonical_domain(v) for v in values if v}
 
@@ -46,12 +57,14 @@ def field_relevance(goal_field: str, opportunity_fields: list[str]) -> int:
         return 75
     if goal in offered:
         return 100
+    if {goal, *offered}.issuperset({"Chemistry", "Chemical Engineering"}):
+        return 85
     # Adjacent commercial disciplines are relevant, but not direct field matches.
     commercial = {"Economics", "Finance", "Business"}
     if goal in commercial and offered.intersection(commercial):
         return 70
     # Adjacent STEM domains receive partial credit, never the score of a direct match.
-    adjacent = {"Chemical Engineering", "Engineering", "Mathematics", "Computer Science"}
+    adjacent = {"Chemistry", "Chemical Engineering", "Engineering", "Mathematics", "Computer Science"}
     if goal in adjacent and offered.intersection(adjacent):
         return 35
     return 5

@@ -1,10 +1,13 @@
 import json
+import logging
 from abc import ABC, abstractmethod
 
 import httpx
 
 from ..config.settings import settings
 from .domains import canonical_domain, detect_opportunity_type
+
+logger = logging.getLogger(__name__)
 
 
 class AIProvider(ABC):
@@ -22,7 +25,9 @@ class MockAIProvider(AIProvider):
             level = 'MASTER' if 'master' in lower else 'PHD' if 'phd' in lower or 'doctor' in lower else 'BACHELOR'
             return json.dumps({'goal_type': 'UNIVERSITY_ADMISSION', 'target_field': field, 'target_opportunity_type': typ, 'target_regions': countries, 'language': 'English', 'funding_requirement': 'HIGH' if any(x in lower for x in ('scholar', 'full funding', 'financial aid', 'substantial funding')) else 'MEDIUM', 'education_level': level, 'constraints': [], 'confidence': .91})
         if 'REVIEW' in prompt:
-            return json.dumps({'overall_score': 72, 'requirement_coverage': {'Leadership': 70, 'Academic motivation': 88, 'Community impact': 35}, 'strengths': ['Clear academic motivation'], 'gaps': ['Community impact lacks concrete evidence'], 'recommendations': ['Add a concrete community-impact example and measurable outcome if one exists.']})
+            from .reviewer import deterministic_review
+            payload = json.loads(prompt.split('REVIEW_JSON ', 1)[1])
+            return deterministic_review(payload['opportunity_type'], payload['requirements'], payload['content']).model_dump_json()
         if 'ADVISOR_JSON ' in prompt:
             payload = json.loads(prompt.split('ADVISOR_JSON ', 1)[1])
             ctx, opportunities = payload['context'], payload['candidate_opportunities']
@@ -39,7 +44,7 @@ class RealAIProvider(AIProvider):
         body = {'model': settings.ai_model, 'messages': [{'role': 'user', 'content': prompt}]}
         if structured:
             body['response_format'] = {'type': 'json_object'}
-        response = httpx.post(settings.ai_base_url.rstrip('/') + '/chat/completions', headers={'Authorization': f'Bearer {settings.ai_api_key}'}, json=body, timeout=20)
+        response = httpx.post(settings.ai_base_url.rstrip('/') + '/chat/completions', headers={'Authorization': f'Bearer {settings.ai_api_key}'}, json=body, timeout=settings.ai_timeout_seconds)
         response.raise_for_status()
         content = response.json()['choices'][0]['message']['content']
         if not isinstance(content, str) or not content.strip():
@@ -56,28 +61,40 @@ class ResilientAIProvider(AIProvider):
         self.real = RealAIProvider()
         self.mock = MockAIProvider()
         self.configured_real = settings.ai_provider.strip().lower() not in ('', 'mock') and bool(settings.ai_api_key.strip())
-        self.last_fallback = not self.configured_real
+        self.last_fallback = False
+        self.last_active_provider = 'mock' if not self.configured_real else settings.ai_provider
 
     @property
     def fallback_active(self):
-        return self.last_fallback
+        return self.last_active_provider == 'mock'
 
     @property
     def provider_name(self):
-        return 'mock' if self.fallback_active else settings.ai_provider
+        return self.last_active_provider
+
+    @property
+    def configured_provider(self):
+        return settings.ai_provider if self.configured_real else 'mock'
 
     def complete(self, prompt: str) -> str:
         if not self.configured_real:
-            self.last_fallback = True
+            self.last_fallback = False
+            self.last_active_provider = 'mock'
+            logger.info('AI request completed provider=mock fallback_used=false')
             return self.mock.complete(prompt)
         for _ in range(2):
             try:
                 result = self.real.complete(prompt)
                 self.last_fallback = False
+                self.last_active_provider = settings.ai_provider
+                logger.info('AI request completed provider=%s fallback_used=false', settings.ai_provider)
                 return result
-            except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            except (httpx.HTTPError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                logger.warning('AI provider failed provider=%s error=%s', settings.ai_provider, type(exc).__name__)
                 continue
         self.last_fallback = True
+        self.last_active_provider = 'mock'
+        logger.warning('AI request completed provider=mock fallback_used=true')
         return self.mock.complete(prompt)
 
 

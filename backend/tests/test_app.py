@@ -220,3 +220,71 @@ def test_advisor_context_is_authenticated_user(monkeypatch):
  assert captured['context']['readiness']['experience']==0
  assert captured['context']['readiness']['extracurricular']==0
  assert captured['context']['user']['name']!='Aruzhan Demo'
+
+def test_advisor_splits_geography_chemistry_and_returns_only_stored_names(monkeypatch):
+ from app.main import ai
+ from app.seed import seed
+ from app.services.domains import requested_domains
+ seed();h=economics_user('geo-chem-advisor@example.com')
+ monkeypatch.setattr(ai,'complete',lambda _:json.dumps({'answer':'Invented Geography Prize','recommendations':[],'general_suggestions':[]}))
+ response=client.post('/api/ai/advisor',headers=h,json={'question':'Find some olympiads for geography/chemistry'})
+ assert response.status_code==200
+ data=response.json();assert requested_domains('geography/chemistry')==['Chemistry','Geography']
+ assert 'International Chemistry Olympiad Prep' in data['answer']
+ assert 'does not contain a strong Geography' in data['answer']
+ assert 'Invented Geography Prize' not in data['answer']
+ with SessionLocal() as db:
+  stored_ids={o.id for o in db.query(Opportunity).all()}
+ assert set(data['opportunity_ids']).issubset(stored_ids)
+
+def test_real_provider_timeout_and_malformed_json_use_mock_fallback(monkeypatch):
+ import httpx
+ from app.config.settings import settings
+ from app.services.ai import ResilientAIProvider
+ monkeypatch.setattr(settings,'ai_provider','openai');monkeypatch.setattr(settings,'ai_api_key','secret')
+ provider=ResilientAIProvider()
+ monkeypatch.setattr(provider.real,'complete',lambda _:(_ for _ in ()).throw(httpx.TimeoutException('timeout')))
+ assert provider.complete('anything') and provider.last_fallback and provider.provider_name=='mock'
+ provider=ResilientAIProvider();monkeypatch.setattr(provider.real,'complete',lambda _:(_ for _ in ()).throw(ValueError('malformed JSON')))
+ result=provider.complete('ADVISOR_JSON '+json.dumps({'context':{'goal':{'field':'Chemistry'},'readiness':{'overall':10},'open_gaps':[]},'candidate_opportunities':[]}))
+ assert json.loads(result)['answer'] and provider.last_fallback
+
+def test_advisor_discovery_survives_provider_unavailability(monkeypatch):
+ from app.main import ai
+ from app.seed import seed
+ seed();h=economics_user('advisor-provider-down@example.com')
+ monkeypatch.setattr(ai,'complete',lambda _:(_ for _ in ()).throw(RuntimeError('provider unavailable')))
+ response=client.post('/api/ai/advisor',headers=h,json={'question':'find economics olympiads'})
+ assert response.status_code==200 and 'International Economics Olympiad Prep' in response.json()['answer']
+
+def test_evidence_based_review_rejects_short_claim_and_rewards_real_evidence():
+ from app.services.reviewer import deterministic_review
+ requirements='Academic record, motivation statement, chemistry preparation, and relevant competition evidence.'
+ weak=deterministic_review('COMPETITION',requirements,'i am good at chemistry')
+ strong_text='I placed second in my regional chemistry olympiad in 2025 and completed a school research project on reaction rates. This experience motivated me to prepare for international competition and deepen my chemistry knowledge.'
+ strong=deterministic_review('COMPETITION',requirements,strong_text)
+ assert weak.review_status=='INSUFFICIENT_CONTENT' and weak.overall_score is None
+ assert {c.criterion for c in weak.criteria}.isdisjoint({'Leadership','Community impact'})
+ assert all(quote.lower() in 'i am good at chemistry' for criterion in weak.criteria for quote in criterion.evidence)
+ assert any(c.status=='MISSING' for c in weak.criteria) and not weak.strengths
+ assert strong.review_status=='COMPLETE' and strong.overall_score is not None
+ assert max(c.score for c in strong.criteria)>max(c.score for c in weak.criteria)
+ assert all(quote in strong_text for criterion in strong.criteria for quote in criterion.evidence)
+
+def test_requirement_derived_rubrics_and_not_applicable_average():
+ from app.services.reviewer import ApplicationReview,rubric_for,validate_provider_review
+ scholarship={name for name,_ in rubric_for('SCHOLARSHIP','Academic and community leadership required')}
+ research={name for name,_ in rubric_for('RESEARCH','Research methods and technical preparation required')}
+ assert scholarship!=research and 'Community impact' in scholarship and 'Technical preparation' in research
+ raw=json.dumps({'review_status':'COMPLETE','overall_score':1,'summary':'ok','criteria':[{'criterion':'Academic strength','score':80,'status':'SUPPORTED','evidence':['GPA 4.0'],'reason':'present','recommendation':'keep it'},{'criterion':'Leadership','score':0,'status':'NOT_APPLICABLE','evidence':[],'reason':'not required','recommendation':'none'}],'strengths':['Academic strength'],'missing_evidence':[],'recommendations':[]})
+ validated=validate_provider_review(raw,'My GPA 4.0 is documented.',{'Academic strength','Leadership'})
+ assert validated.overall_score==80
+
+def test_application_review_endpoint_has_no_canned_scores():
+ from app.seed import seed
+ seed();h=economics_user('review-endpoint@example.com')
+ with SessionLocal() as db:oid=db.query(Opportunity).filter_by(title='International Chemistry Olympiad Prep').one().id
+ result=client.post('/api/applications/review',headers=h,json={'opportunity_id':oid,'document_type':'MOTIVATION_LETTER','title':'Draft','content':'i am good at chemistry'})
+ assert result.status_code==200
+ body=result.json();assert body['review_status']=='INSUFFICIENT_CONTENT' and body['overall_score'] is None
+ assert all(c['score']!=70 for c in body['criteria']) and all(c['criterion'] not in ('Leadership','Community impact') for c in body['criteria'])
