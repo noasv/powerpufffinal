@@ -134,7 +134,7 @@ def test_economics_personalization_integration_and_isolation():
  result=client.post('/api/onboarding/complete',headers=h,json={'profile':profile,'goal':goal});assert result.status_code==200
  with SessionLocal() as db:
   for title,typ,fields,cats,restrict in [('Economics Olympiad','COMPETITION',['Economics'],['EXPERIENCE'],False),('Open Global Scholarship','SCHOLARSHIP',['General'],['FINANCIAL'],False),('Chemistry-specific Degree','UNIVERSITY_PROGRAM',['Chemistry'],['ACADEMIC'],True)]:
-   db.add(Opportunity(title=title,provider='Test Demo Dataset',opportunity_type=typ,description='Demo dataset record',country='International',eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',fields=json.dumps(fields),gap_categories=json.dumps(cats),field_restriction=restrict,funding_type='FULL',deadline=date.today()+timedelta(days=90),source_label='Demo dataset'))
+   db.add(Opportunity(title=title,provider='Test Demo Dataset',opportunity_type=typ,description='Demo dataset record',country='International',eligible_countries='["International"]',education_levels='["HIGH_SCHOOL"]',fields=json.dumps(fields),gap_categories=json.dumps(cats),field_restriction=restrict,funding_type='FULL',deadline=date.today()+timedelta(days=90),source_label='Pathly Demo Dataset'))
   db.commit()
  stored=client.get('/api/profile',headers=h).json();assert stored['projects']=='none' and stored['research_experience']=='none' and stored['volunteering']=='none' and stored['extracurriculars']=='none' and stored['ielts_score'] is None and stored['preferred_fields']==['Economics'] and stored['preferred_countries']==['Europe']
  dash=client.get('/api/dashboard',headers=h).json();assert dash['goal']['target_field']=='Economics' and 'Chemical Engineering' not in dash['goal']['title'] and dash['readiness']['experience']<=20
@@ -168,14 +168,14 @@ def test_seed_updates_existing_database_without_deleting_users():
  from app.seed import seed,ECONOMICS_OPPORTUNITIES
  h=auth_setup('persistent-user@example.com')
  with SessionLocal() as db:
-  existing=db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Demo dataset').first()
+  existing=db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Pathly Demo Dataset').first()
   if existing:db.delete(existing)
   users=db.query(User).count();db.commit()
  seed()
  with SessionLocal() as db:
   assert db.query(User).count()>=users  # seed may add the demo account, never removes existing users
   assert db.query(User).filter_by(email='persistent-user@example.com').one()
-  assert db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Demo dataset').one()
+  assert db.query(Opportunity).filter_by(title=ECONOMICS_OPPORTUNITIES[0][0],source_label='Pathly Demo Dataset').one()
 
 def test_advisor_returns_stored_economics_and_rejects_invented_record(monkeypatch):
  from app.main import ai
@@ -230,8 +230,7 @@ def test_advisor_splits_geography_chemistry_and_returns_only_stored_names(monkey
  response=client.post('/api/ai/advisor',headers=h,json={'question':'Find some olympiads for geography/chemistry'})
  assert response.status_code==200
  data=response.json();assert requested_domains('geography/chemistry')==['Chemistry','Geography']
- assert 'International Chemistry Olympiad Prep' in data['answer']
- assert 'does not contain a strong Geography' in data['answer']
+ assert 'No matching source-backed opportunity was found' in data['answer']
  assert 'Invented Geography Prize' not in data['answer']
  with SessionLocal() as db:
   stored_ids={o.id for o in db.query(Opportunity).all()}
@@ -255,7 +254,7 @@ def test_advisor_discovery_survives_provider_unavailability(monkeypatch):
  seed();h=economics_user('advisor-provider-down@example.com')
  monkeypatch.setattr(ai,'complete',lambda _:(_ for _ in ()).throw(RuntimeError('provider unavailable')))
  response=client.post('/api/ai/advisor',headers=h,json={'question':'find economics olympiads'})
- assert response.status_code==200 and 'International Economics Olympiad Prep' in response.json()['answer']
+ assert response.status_code==200 and 'Youth Economics Policy Challenge' in response.json()['answer']
 
 def test_evidence_based_review_rejects_short_claim_and_rewards_real_evidence():
  from app.services.reviewer import deterministic_review
@@ -283,8 +282,63 @@ def test_requirement_derived_rubrics_and_not_applicable_average():
 def test_application_review_endpoint_has_no_canned_scores():
  from app.seed import seed
  seed();h=economics_user('review-endpoint@example.com')
- with SessionLocal() as db:oid=db.query(Opportunity).filter_by(title='International Chemistry Olympiad Prep').one().id
+ with SessionLocal() as db:oid=db.query(Opportunity).filter_by(title='Young Innovators Challenge').one().id
  result=client.post('/api/applications/review',headers=h,json={'opportunity_id':oid,'document_type':'MOTIVATION_LETTER','title':'Draft','content':'i am good at chemistry'})
  assert result.status_code==200
  body=result.json();assert body['review_status']=='INSUFFICIENT_CONTENT' and body['overall_score'] is None
  assert all(c['score']!=70 for c in body['criteria']) and all(c['criterion'] not in ('Leadership','Community impact') for c in body['criteria'])
+
+def test_discovery_request_domain_and_type_semantics():
+ from app.services.discovery import parse_discovery_request
+ assert parse_discovery_request('find physics olympiads').domains==['Physics']
+ request=parse_discovery_request('find economics competitions')
+ assert request.domains==['Economics'] and request.opportunity_types==['COMPETITION']
+ assert parse_discovery_request('find chemical engineering scholarships').domains==['Chemical Engineering']
+ assert parse_discovery_request('find computer science courses').opportunity_types==['COURSE']
+
+def test_general_is_not_strong_explicit_subject_match():
+ from app.services.domains import field_relevance
+ assert field_relevance('Mathematics',['Mathematics'])==100
+ assert field_relevance('Mathematics',['General'])<70
+
+def test_source_validation_deduplication_and_unknown_deadline():
+ from app.services.discovery import DiscoveredOpportunity,deduplicate,validated_candidate
+ base=dict(title='Real Program',provider='Organizer',opportunity_type='COMPETITION',description=None,source_domain='',source_label='Search')
+ placeholder=DiscoveredOpportunity(**base,source_url='https://example.org/program',verification_status='VERIFIED')
+ assert validated_candidate(placeholder).verification_status=='UNVERIFIED'
+ first=DiscoveredOpportunity(**base,source_url='https://organizer.edu/program')
+ duplicate=DiscoveredOpportunity(**base,source_url='https://organizer.edu/program')
+ results=deduplicate([first,duplicate])
+ assert len(results)==1 and results[0].deadline is None
+
+def test_demo_fallback_is_explicit_and_strict(monkeypatch):
+ from app.services.discovery import discover,parse_discovery_request
+ from app.config.settings import settings
+ from app.seed import seed
+ seed();monkeypatch.setattr(settings,'opportunity_discovery_provider','demo')
+ with SessionLocal() as db:
+  math=discover(db,parse_discovery_request('find math olympiads'))
+  assert math.mode=='DEMO' and math.fallback_used
+  assert all(x.verification_status=='DEMO' for x in math.records)
+  assert all(x.opportunity_type=='COMPETITION' for x in math.records)
+  assert not any(x.title=='IELTS Preparation Path' for x in math.records)
+  econ=discover(db,parse_discovery_request('find economics competitions'))
+  assert all('Economics' in json.loads(x.fields) and x.opportunity_type=='COMPETITION' for x in econ.records)
+
+def test_external_failure_is_controlled(monkeypatch):
+ from app.services.discovery import discover,parse_discovery_request,RealOpportunityDiscoveryProvider
+ from app.config.settings import settings
+ from app.seed import seed
+ seed();monkeypatch.setattr(settings,'opportunity_discovery_provider','serper');monkeypatch.setattr(settings,'opportunity_search_api_key','key')
+ monkeypatch.setattr(RealOpportunityDiscoveryProvider,'search',lambda *_: (_ for _ in ()).throw(RuntimeError('down')))
+ with SessionLocal() as db:
+  result=discover(db,parse_discovery_request('find economics competitions'))
+  assert result.mode=='DEMO' and result.fallback_used and 'down' in result.error
+
+def test_search_results_and_recommendations_are_separate():
+ from app.seed import seed
+ seed();h=economics_user('search-separation@example.com')
+ results=client.get('/api/opportunities',headers=h,params={'search':'math olympiad'}).json()
+ assert not any(x['title']=='IELTS Preparation Path' for x in results)
+ recommendations=client.get('/api/opportunities',headers=h).json()
+ assert isinstance(recommendations,list)

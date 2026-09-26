@@ -4,10 +4,9 @@ from .database import Base,engine,SessionLocal
 from .models import *
 from .services.engines import sync_gaps,readiness,generate_roadmap
 from pwdlib import PasswordHash
-TYPES=['SCHOLARSHIP']*10+['UNIVERSITY_PROGRAM']*8+['COMPETITION']*5+['RESEARCH']*5+['INTERNSHIP']*3+['VOLUNTEERING']*2+['COURSE']*3+['LANGUAGE_PROGRAM']*2+['SUMMER_SCHOOL']*2+['EXCHANGE']*2
-NAMES=['Global Scholars Award','Future Engineers Scholarship','International Merit Grant','STEM Access Scholarship','Community Leaders Award','Women in Science Grant','Sustainable Futures Scholarship','Academic Excellence Fund','Global Citizens Grant','Innovation Scholarship','European Chemical Engineering BSc','Sustainable Process Engineering','International Engineering Bachelor','Applied Chemistry Program','Materials Science BSc','Environmental Engineering Degree','Biotechnology Bachelor','Energy Engineering Program','International Chemistry Olympiad Prep','Young Innovators Challenge','Global Science Competition','Math Modeling Challenge','Sustainability Case Competition','Chemical Research Summer Lab','European Research Academy','Materials Discovery Summer School','Student Science Fellowship','Green Chemistry Lab Program','Engineering Virtual Internship','STEM Industry Internship','Social Impact Internship','Global Volunteer Network','Science Outreach Volunteers','Academic Writing Course','Data Skills for Scientists','Project Design Fundamentals','IELTS Preparation Path','English for University','Engineering Summer School','Science Leadership Summer School','European Student Exchange','Global STEM Exchange']
+TYPES=['SCHOLARSHIP']*10+['UNIVERSITY_PROGRAM']*8+['COMPETITION']*4+['RESEARCH']*5+['INTERNSHIP']*3+['VOLUNTEERING']*2+['COURSE']*3+['LANGUAGE_PROGRAM']*2+['SUMMER_SCHOOL']*2+['EXCHANGE']*2
+NAMES=['Global Scholars Award','Future Engineers Scholarship','International Merit Grant','STEM Access Scholarship','Community Leaders Award','Women in Science Grant','Sustainable Futures Scholarship','Academic Excellence Fund','Global Citizens Grant','Innovation Scholarship','European Chemical Engineering BSc','Sustainable Process Engineering','International Engineering Bachelor','Applied Chemistry Program','Materials Science BSc','Environmental Engineering Degree','Biotechnology Bachelor','Energy Engineering Program','Young Innovators Challenge','Global Science Competition','Math Modeling Challenge','Sustainability Case Competition','Chemical Research Summer Lab','European Research Academy','Materials Discovery Summer School','Student Science Fellowship','Green Chemistry Lab Program','Engineering Virtual Internship','STEM Industry Internship','Social Impact Internship','Global Volunteer Network','Science Outreach Volunteers','Academic Writing Course','Data Skills for Scientists','Project Design Fundamentals','IELTS Preparation Path','English for University','Engineering Summer School','Science Leadership Summer School','European Student Exchange','Global STEM Exchange']
 ECONOMICS_OPPORTUNITIES = [
- ('International Economics Olympiad Prep','COMPETITION',['Economics'],['EXPERIENCE','EXTRACURRICULAR']),
  ('Youth Economics Policy Challenge','COMPETITION',['Economics'],['EXPERIENCE','EXTRACURRICULAR']),
  ('Economics and Finance Summer Institute','SUMMER_SCHOOL',['Economics','Finance'],['ACADEMIC','EXPERIENCE']),
  ('Economics Research Academy','RESEARCH',['Economics'],['EXPERIENCE']),
@@ -18,7 +17,7 @@ ECONOMICS_OPPORTUNITIES = [
 ]
 
 def _opportunity_values(typ,fields,cats,index):
- return {'provider':'Pathly Demo Dataset','opportunity_type':typ,'description':f'A structured {typ.lower().replace("_"," ")} for motivated international students. This is a Demo dataset record, not a verified live listing.','official_url':'https://example.org/pathly-demo','country':'International','delivery_mode':'ONLINE','min_age':16,'max_age':24,'eligible_countries':json.dumps(['International']),'education_levels':json.dumps(['HIGH_SCHOOL','BACHELOR']),'fields':json.dumps(fields),'field_restriction':typ=='UNIVERSITY_PROGRAM','funding_type':'FULL' if typ=='SCHOLARSHIP' else 'PARTIAL','funding_amount_text':'Demo funding; verify with source','language_requirements':'English B2','deadline':date.today()+timedelta(days=60+index*3),'start_date':date.today()+timedelta(days=100+index*3),'requirements_text':'Demo requirements: academic record, motivation statement, and relevant evidence. Verify before applying.','verified_at':None,'source_label':'Demo dataset','gap_categories':json.dumps(cats)}
+ return {'provider':'Pathly Demo Dataset','opportunity_type':typ,'description':f'A structured {typ.lower().replace("_"," ")} for motivated international students. This is a demo record, not a verified live listing.','official_url':'','source_url':'https://example.org/pathly-demo/'+str(index),'source_domain':'example.org','source_type':'DEMO','verification_status':'DEMO','discovered_at':None,'country':'International','delivery_mode':'ONLINE','min_age':16,'max_age':24,'eligible_countries':json.dumps(['International']),'education_levels':json.dumps(['HIGH_SCHOOL','BACHELOR']),'fields':json.dumps(fields),'field_restriction':typ=='UNIVERSITY_PROGRAM','funding_type':'FULL' if typ=='SCHOLARSHIP' else 'PARTIAL','funding_amount_text':'Demo funding; verify with source','language_requirements':'English B2','deadline':date.today()+timedelta(days=60+index*3),'start_date':date.today()+timedelta(days=100+index*3),'requirements_text':'Demo requirements: academic record, motivation statement, and relevant evidence. Verify before applying.','verified_at':None,'source_label':'Pathly Demo Dataset','gap_categories':json.dumps(cats)}
 
 def upsert_canonical_opportunities(db):
  """Version the Demo catalogue in-place without deleting users or user data."""
@@ -26,7 +25,8 @@ def upsert_canonical_opportunities(db):
  for name,typ in zip(NAMES,TYPES):
   lower=name.lower()
   cats=['EXPERIENCE'] if typ in ('RESEARCH','INTERNSHIP','COMPETITION','SUMMER_SCHOOL') else ['LANGUAGE'] if typ in ('LANGUAGE_PROGRAM','COURSE') and ('english' in lower or 'ielts' in lower) else ['FINANCIAL'] if typ=='SCHOLARSHIP' else ['ACADEMIC']
-  if any(x in lower for x in ('ai ','coding','data skills')):fields=['Computer Science']
+  if 'math' in lower:fields=['Mathematics']
+  elif any(x in lower for x in ('ai ','coding','data skills')):fields=['Computer Science']
   elif typ=='SCHOLARSHIP' or any(x in lower for x in ('volunteer','academic writing','english','ielts')):fields=['General']
   elif any(x in lower for x in ('chemical','chemistry','process','materials','biotechnology')):fields=['Chemical Engineering']
   else:fields=['Engineering']
@@ -34,8 +34,8 @@ def upsert_canonical_opportunities(db):
  catalogue.extend(ECONOMICS_OPPORTUNITIES)
  for i,(name,typ,fields,cats) in enumerate(catalogue):
   # Title plus the explicit source label is the stable canonical key.
-  opp=db.query(Opportunity).filter_by(title=name,source_label='Demo dataset').first()
-  if not opp:opp=Opportunity(title=name,source_label='Demo dataset');db.add(opp)
+  opp=db.query(Opportunity).filter_by(title=name,provider='Pathly Demo Dataset').first()
+  if not opp:opp=Opportunity(title=name,source_label='Pathly Demo Dataset');db.add(opp)
   for key,value in _opportunity_values(typ,fields,cats,i).items():setattr(opp,key,value)
  db.flush()
 

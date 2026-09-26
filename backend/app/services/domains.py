@@ -6,7 +6,10 @@ DOMAIN_ALIASES = {
     "Economics": {"economics", "economy", "economic", "economic policy", "econometrics"},
     "Finance": {"finance", "financial markets", "investment", "banking"},
     "Business": {"business", "entrepreneurship", "commerce", "management"},
-    "Computer Science": {"computer science", "computing", "software", "programming", "artificial intelligence", "ai", "machine learning", "data science", "cybersecurity"},
+    "Computer Science": {"computer science", "computing", "software", "programming", "cybersecurity"},
+    "AI": {"artificial intelligence", "ai", "machine learning"},
+    "Data Science": {"data science", "data analytics", "data analysis"},
+    "Physics": {"physics", "astrophysics", "quantum physics"},
     "Chemistry": {"chemistry", "green chemistry", "organic chemistry", "inorganic chemistry", "geochemistry"},
     "Geography": {"geography", "geographic", "human geography", "physical geography"},
     "Chemical Engineering": {"chemical engineering", "process engineering", "materials science", "biotechnology"},
@@ -45,6 +48,10 @@ def requested_domains(value: str) -> list[str]:
     for name, aliases in DOMAIN_ALIASES.items():
         if any(re.search(rf"\b{re.escape(clean(alias))}\b", normalized) for alias in aliases):
             found.append(name)
+    # Prefer a named specialization over its parent token ("chemical engineering"
+    # must not become two independent requested domains).
+    if "Chemical Engineering" in found and "Engineering" in found:
+        found.remove("Engineering")
     return found
 
 def domain_set(values) -> set[str]:
@@ -54,7 +61,7 @@ def field_relevance(goal_field: str, opportunity_fields: list[str]) -> int:
     goal = canonical_domain(goal_field)
     offered = domain_set(opportunity_fields)
     if not offered or "General" in offered:
-        return 75
+        return 15 if goal != "General" else 100
     if goal in offered:
         return 100
     if {goal, *offered}.issuperset({"Chemistry", "Chemical Engineering"}):
@@ -64,7 +71,7 @@ def field_relevance(goal_field: str, opportunity_fields: list[str]) -> int:
     if goal in commercial and offered.intersection(commercial):
         return 70
     # Adjacent STEM domains receive partial credit, never the score of a direct match.
-    adjacent = {"Chemistry", "Chemical Engineering", "Engineering", "Mathematics", "Computer Science"}
+    adjacent = {"Chemistry", "Physics", "Chemical Engineering", "Engineering", "Mathematics", "Computer Science", "AI", "Data Science"}
     if goal in adjacent and offered.intersection(adjacent):
         return 35
     return 5

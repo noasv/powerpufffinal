@@ -14,6 +14,7 @@ from .config.settings import settings
 from .services.engines import *
 from .services.ai import ai
 from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean,requested_domains
+from .services.discovery import discover,parse_discovery_request
 from .services.reviewer import ApplicationReview,deterministic_review,rubric_for,validate_provider_review
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
@@ -125,14 +126,15 @@ def gap_detail(gap_id:int,u=Depends(current),db:Session=Depends(get_db)):
 def opportunities(search:str='',opportunity_type:str='',country:str='',funding:str='',sort:str='recommended',u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:return []
- gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);q=db.query(Opportunity)
+ gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);q=db.query(Opportunity); discovery_result=None
  if opportunity_type:q=q.filter_by(opportunity_type=opportunity_type)
  if country:q=q.filter_by(country=country)
  if funding:q=q.filter_by(funding_type=funding)
  records=q.all()
  if search:
-  needle=clean(search)
-  records=[o for o in records if needle in clean(' '.join((o.title,o.provider,o.description))) or search_matches_domain(search,j(o.fields))]
+  request=parse_discovery_request(search,p.education_level)
+  if opportunity_type and not request.opportunity_types:request.opportunity_types=[opportunity_type]
+  discovery_result=discover(db,request);records=discovery_result.records;db.commit()
  data=[opportunity_view(p,g,o,gs,r) for o in records]
  # Search operates on the eligible universe; recommendation thresholds only shape feeds.
  if search:data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE']
@@ -182,14 +184,15 @@ def _advisor_answer(raw, candidates, search_intent, domains=None):
  if search_intent:
   # Never surface free-form provider text as a stored opportunity fact. The model
   # selects database ids; titles and other facts are rendered exclusively here.
-  answer='I matched your question against the eligible Pathly opportunity catalogue.'
+  answer='I searched the source-backed opportunity pipeline.'
   if verified:
-   facts=' Stored Pathly opportunities: '+'; '.join(f"{opp['title']} — {reason or 'helps address '+', '.join(opp['gap_categories']).lower()}" for opp,reason in verified)+'.'
+   # Provider prose is untrusted too: render only deterministic candidate facts.
+   facts=' Matching opportunities: '+'; '.join(f"{opp['title']} ({opp['verification_status']})" for opp,_reason in verified)+'.'
   elif candidates:
    # A malformed provider response cannot erase verified search results.
-   facts=' Stored Pathly opportunities: '+'; '.join(f"{opp['title']} — helps address {', '.join(opp['gap_categories']).lower()}." for opp in candidates[:5])
+   facts=' Matching opportunities: '+'; '.join(f"{opp['title']} ({opp['verification_status']})." for opp in candidates[:5])
   else:
-   facts=" I couldn't find a matching stored opportunity in the current Pathly dataset."
+   facts=" No matching source-backed opportunity was found. I will not invent one."
   if domains:
    matched={domain for domain in domains if any(field_relevance(domain,opp['fields'])>=70 for opp in candidates)}
    missing=[domain for domain in domains if domain not in matched]
@@ -214,6 +217,10 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
  requested_fields=domains or [g.target_field]
  requested_gap='EXTRACURRICULAR' if 'extracurricular' in question else None
+ discovery_result=None
+ if search_intent:
+  discovery_result=discover(db,parse_discovery_request(x.question,p.education_level));db.commit()
+  all_opps=discovery_result.records;views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
  candidates=[]
  for opp,view in zip(all_opps,views):
   if view['eligibility_status']=='NOT_ELIGIBLE':continue
@@ -221,13 +228,15 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
   if search_intent and relevance<70:continue
   if requested_type and opp.opportunity_type!=requested_type:continue
   if requested_gap and requested_gap not in j(opp.gap_categories):continue
-  candidates.append({'id':opp.id,'title':opp.title,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_label':opp.source_label})
+  if opp.verification_status not in ('VERIFIED','SOURCE_FOUND','DEMO'):continue
+  candidates.append({'id':opp.id,'title':opp.title,'provider':opp.provider,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_url':opp.source_url,'source_label':opp.source_label,'verification_status':opp.verification_status})
  candidates.sort(key=lambda z:(z['field_relevance'],z['match_score']),reverse=True);candidates=candidates[:8]
  prompt={'instructions':['Answer the question using only this authenticated user context.','Return JSON with answer, recommendations [{id, reason}], and general_suggestions.','Recommendation ids must come from candidate_opportunities. Do not put opportunity names, URLs, eligibility, or deadlines in answer; the server renders stored facts.','General suggestions must be activity categories, never invented named opportunities, and must be clearly non-Pathly.'],'question':x.question,'context':context,'candidate_opportunities':candidates}
  try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
  except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt));ai.last_fallback=True;ai.last_active_provider='mock'
  answer,ids=_advisor_answer(raw,candidates,search_intent,requested_fields if domains else None)
- return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
+ selected=[opportunity_view(p,g,o,gs,r) for o in all_opps if o.id in ids]
+ return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'opportunities':selected,'discovery':({'mode':discovery_result.mode,'fallback_used':discovery_result.fallback_used,'error':discovery_result.error,'request':discovery_result.request.model_dump()} if discovery_result else None),'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
  opp=db.get(Opportunity,x.opportunity_id)
