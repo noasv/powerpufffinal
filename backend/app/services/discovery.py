@@ -31,10 +31,10 @@ SOCIAL={"facebook.com","instagram.com","linkedin.com","tiktok.com","x.com","twit
 FORUMS={"reddit.com","quora.com","stackexchange.com"}
 AGGREGATORS={"google.com","bing.com","search.yahoo.com"}
 BLOG_HOSTS={"medium.com","substack.com","blogspot.com","wordpress.com"}
-LISTICLE=re.compile(r"\b(top|best)\s+\d+\b|\b\d+\s+(best\s+)?(olympiads?|competitions?|scholarships?|opportunities)\b|\blist of\b",re.I)
-ADVICE=re.compile(r"\b(how to|guide to|tips for|what is|why (join|enter)|rankings?|roundup|resources? for)\b",re.I)
+LISTICLE=re.compile(r"\b(top|best)\s+\d+\b|\b\d+\s+(best\s+)?(olympiads?|competitions?|contests?|scholarships?|programs?|opportunities|internships?|courses?)\b|\blist of\b|\b(roundup|directory)\b",re.I)
+ADVICE=re.compile(r"\b(how to|guide to|tips for|what is|why (join|enter)|rankings?|resources? for|advice)\b",re.I)
 NEWS=re.compile(r"\b(news|blog|article|announces?|winners?|results?|recap)\b",re.I)
-CONCRETE=re.compile(r"\b(olympiad|competition|challenge|scholarship|fellowship|internship|summer school|research program|exchange program|award|grant|bursary)\b",re.I)
+CONCRETE=re.compile(r"\b(olympiad|competition|contest|challenge|hackathon|scholarship|studentship|fellowship|internship|summer (school|program|programme|academy)|research (program|programme|experience|placement)|volunteer(ing)?|language (course|program|programme|school)|course|training|undergraduate|bachelor|bsc|degree program|bursary)\b",re.I)
 
 # Search results can mention a real competition while actually pointing to a
 # problem bank, archive, study resource, or informational page. These pages
@@ -42,15 +42,28 @@ CONCRETE=re.compile(r"\b(olympiad|competition|challenge|scholarship|fellowship|i
 RESOURCE_ONLY=re.compile(
  r"\b(problem bank|problem archive|past problems?|practice problems?|"
  r"practice questions?|solutions? archive|study materials?|learning resources?|"
- r"collection of .* problems?|explore [\d,]+\+? .*problems?)\b",
+ r"collection of .* problems?|explore [\d,]+\+? .*problems?|past papers?|"
+ r"past questions?|answer keys?|sample essays?|winning essays?|essay archive|"
+ r"preparation materials?|practice tests?)\b",
  re.I,
 )
 PARTICIPATION=re.compile(
- r"\b(register|registration|apply|application|participate|participant|"
+ r"\b(register|registration|apply|applications?|participate|participant|"
  r"eligibility|eligible|enroll|enrollment|enter|students? compete|"
  r"competitors?|open to|deadline|submission|submit|join)\b",
  re.I,
 )
+TYPE_ACTIONS={
+ "COMPETITION":re.compile(r"\b(enter|register|registration|participate|submit|submission|deadline|eligibility|rules|prizes?|open to|compete|competition|contest|olympiad)\b",re.I),
+ "SCHOLARSHIP":re.compile(r"\b(apply|applications?|eligibility|funding|tuition|financial support|deadline|amount|open to|applicants?)\b",re.I),
+ "RESEARCH":re.compile(r"\b(apply|applications?|participants?|mentor|laborator(y|ies)|projects?|placement|open to)\b",re.I),
+ "SUMMER_SCHOOL":re.compile(r"\b(apply|applications?|register|registration|enroll|dates?|participants?|open to|attend)\b",re.I),
+ "INTERNSHIP":re.compile(r"\b(apply|applications?|interns?|placement|positions?|eligibility|open to)\b",re.I),
+ "UNIVERSITY_PROGRAM":re.compile(r"\b(apply|applications?|admission|curriculum|entry requirements?|requirements?|enroll)\b",re.I),
+ "VOLUNTEERING":re.compile(r"\b(volunteer|join|apply|applications?|register|registration|participants?|open to)\b",re.I),
+ "COURSE":re.compile(r"\b(enroll|register|registration|certificate|start date|apply|admission|open to)\b",re.I),
+ "LANGUAGE_PROGRAM":re.compile(r"\b(enroll|register|registration|applications?|apply|admission|start date|open to)\b",re.I),
+}
 logger=logging.getLogger(__name__)
 
 def domain_of(url:str)->str:
@@ -77,7 +90,7 @@ def classify(result:RawSearchResult)->ResultCategory:
  if ADVICE.search(result.title):return ResultCategory.GENERAL_INFORMATION
  if not CONCRETE.search(text):return ResultCategory.GENERAL_INFORMATION
  # Institution, government, and organizer pages are strong first-party signals.
- if domain.endswith((".edu",".ac.uk",".gov")) or re.search(r"\b(official|apply|application|registration)\b",text,re.I):return ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
+ if domain.endswith(".edu") or re.search(r"(^|\.)(ac|edu|gov)\.[a-z.]+$",domain) or re.search(r"\bofficial\b",text,re.I):return ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
  # A dedicated organizer domain normally shares a meaningful brand word with
  # the program title. Arbitrary publishers do not get this trust signal.
  brand={x for x in re.split(r"[^a-z0-9]+",domain.split('.')[0]) if len(x)>3}
@@ -86,7 +99,12 @@ def classify(result:RawSearchResult)->ResultCategory:
 
 def _detected_domains(text:str)->list[str]:
  normalized=clean(text)
- return [name for name,aliases in DOMAIN_ALIASES.items() if any(re.search(rf"\b{re.escape(clean(alias))}\b",normalized) for alias in aliases)]
+ return [name for name,aliases in DOMAIN_ALIASES.items() if name!="General" and any(re.search(rf"\b{re.escape(clean(alias))}\b",normalized) for alias in aliases)]
+
+def _has_actionable_evidence(opportunity_type:str,evidence:str)->bool:
+ """Require action evidence appropriate to the detected result type."""
+ pattern=TYPE_ACTIONS.get(opportunity_type)
+ return bool(pattern and pattern.search(evidence))
 
 def _reason_for_category(category:ResultCategory)->RejectionReason:
  try:return RejectionReason(category.value)
@@ -101,7 +119,10 @@ def _title(raw:str)->str:
  return re.split(r"\s+[|–—]\s+",raw.strip(),maxsplit=1)[0].strip()
 def _provider(raw:RawSearchResult)->str:
  branded=re.split(r"\s+[|–—]\s+",raw.title.strip(),maxsplit=1)
- return branded[1].strip() if len(branded)>1 else domain_of(raw.url)
+ # A host is provenance, not necessarily the provider's name. Preserve the
+ # model's empty/unknown representation unless search evidence explicitly
+ # supplies title branding.
+ return branded[1].strip() if len(branded)>1 else ""
 def qualify(result:RawSearchResult,query:str):
  category=classify(result)
  evidence=f"{result.title} {result.snippet}"
@@ -116,27 +137,29 @@ def qualify(result:RawSearchResult,query:str):
  query_type=detect_opportunity_type(query);typ=detect_opportunity_type(evidence)
  domains=requested_domains(query)
  if not typ or (query_type and typ!=query_type):return None,RejectionReason.TYPE_MISMATCH
- if not domains:return None,RejectionReason.SUBJECT_MISMATCH
  # Explicit query intent is strict: the result must contain the requested subject
  # in its visible search evidence, rather than inheriting it by assumption.
  result_domains=_detected_domains(evidence)
- if not any(d in result_domains for d in domains):return None,RejectionReason.SUBJECT_MISMATCH
+ if domains and not any(d in result_domains for d in domains):return None,RejectionReason.SUBJECT_MISMATCH
+
+ if not _has_actionable_evidence(typ,evidence):
+  return None,RejectionReason.NO_PARTICIPATION_SIGNAL
 
  # A search hit about an opportunity is not necessarily an opportunity itself.
  # Reject obvious archives/problem banks unless the visible evidence also
  # contains a concrete participation signal.
- if category==ResultCategory.CONCRETE_OPPORTUNITY and not PARTICIPATION.search(evidence):
-  # Dedicated domains whose brand occurs in the title are credible organizer
-  # pages; all other non-institutional results need an actionable signal.
-  brand={x for x in re.split(r"[^a-z0-9]+",domain_of(result.url).split('.')[0]) if len(x)>3}
-  if not brand.intersection(clean(result.title).split()):return None,RejectionReason.NO_PARTICIPATION_SIGNAL
-
  url=canonicalize_url(result.url); domain=domain_of(url); first=category==ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
- return {'title':_title(result.title),'provider':_provider(result),'opportunity_type':typ,'description':result.snippet.strip() or 'Source page found; details have not yet been extracted.','official_url':url,'country':'Unknown','delivery_mode':'UNKNOWN','eligible_countries':'[]','education_levels':'[]','fields':json.dumps(domains),'field_restriction':True,'funding_type':'UNKNOWN','funding_amount_text':None,'cost_text':None,'language_requirements':None,'deadline':None,'requirements_text':'','source_label':'Source Found','gap_categories':'[]','source_url':url,'source_type':category.value,'source_domain':domain,'verification_status':'SOURCE_FOUND','discovered_at':datetime.utcnow(),'canonical_source_url':url,'discovery_source_url':url,'source_quality':'FIRST_PARTY' if first else 'CREDIBLE_SOURCE','is_first_party':first,'verification_notes':'Search evidence identifies a concrete opportunity; structured facts remain unverified.','last_checked_at':datetime.utcnow()},category
+ return {'title':_title(result.title),'provider':_provider(result),'opportunity_type':typ,'description':result.snippet.strip() or 'Source page found; details have not yet been extracted.','official_url':url,'country':'Unknown','delivery_mode':'UNKNOWN','eligible_countries':'[]','education_levels':'[]','fields':json.dumps(domains),'field_restriction':bool(domains),'funding_type':'UNKNOWN','funding_amount_text':None,'cost_text':None,'language_requirements':None,'deadline':None,'requirements_text':'','source_label':'Source Found','gap_categories':'[]','source_url':url,'source_type':category.value,'source_domain':domain,'verification_status':'SOURCE_FOUND','discovered_at':datetime.utcnow(),'canonical_source_url':url,'discovery_source_url':url,'source_quality':'FIRST_PARTY' if first else 'CREDIBLE_SOURCE','is_first_party':first,'verification_notes':'Search evidence identifies a concrete opportunity; structured facts remain unverified.','last_checked_at':datetime.utcnow()},category
+
+def search_query(query:str)->str:
+ """Add one economical first-party hint without changing explicit intent."""
+ value=query.strip()
+ if not detect_opportunity_type(value) or re.search(r"\b(official|apply|application|register|enroll)\b",value,re.I):return value
+ return f"{value} official apply"
 
 class SerperProvider:
  def search(self,query:str)->list[RawSearchResult]:
-  response=httpx.post(settings.opportunity_search_base_url,headers={'X-API-KEY':settings.opportunity_search_api_key,'Content-Type':'application/json'},json={'q':query,'num':10},timeout=settings.opportunity_search_timeout_seconds)
+  response=httpx.post(settings.opportunity_search_base_url,headers={'X-API-KEY':settings.opportunity_search_api_key,'Content-Type':'application/json'},json={'q':search_query(query),'num':10},timeout=settings.opportunity_search_timeout_seconds)
   response.raise_for_status(); payload=response.json()
   if not isinstance(payload,dict) or not isinstance(payload.get('organic',[]),list):raise ValueError('Malformed discovery response')
   return [RawSearchResult(str(x.get('title','')),str(x.get('link','')),str(x.get('snippet',''))) for x in payload['organic'] if isinstance(x,dict)]

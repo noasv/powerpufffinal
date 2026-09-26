@@ -2,8 +2,8 @@ import pytest
 import json
 from app.database import Base,engine,SessionLocal
 from app.models import Opportunity
-from app.services.discovery import RawSearchResult,RejectionReason,ResultCategory,classify,discover,persist_candidates,qualify
-from app.services.domains import canonical_domain,requested_domains
+from app.services.discovery import RawSearchResult,RejectionReason,ResultCategory,classify,discover,persist_candidates,qualify,search_query
+from app.services.domains import canonical_domain,detect_opportunity_type,requested_domains
 
 def setup_function():
  Base.metadata.drop_all(engine);Base.metadata.create_all(engine)
@@ -107,3 +107,78 @@ def test_canonical_duplicate_ignores_www_scheme_query_and_fragment():
         admitted, rejected = persist_candidates(db, raw, "chemistry competition")
         assert len(admitted) == 1
         assert [item["reason"] for item in rejected] == ["DUPLICATE"]
+
+
+@pytest.mark.parametrize(("query", "result", "expected_type"), [
+    ("chemistry olympiad", RawSearchResult("National Chemistry Olympiad", "https://chemistryolympiad.org/enter", "High school students may register for the chemistry olympiad; see eligibility and rules."), "COMPETITION"),
+    ("essay competition", RawSearchResult("International Student Essay Prize", "https://essayprize.org/competition", "Enter the essay competition by the submission deadline; rules and prizes are available."), "COMPETITION"),
+    ("scholarships for international students", RawSearchResult("International Excellence Award", "https://www.example.edu/scholarships/excellence", "Scholarship funding for international students: review eligibility and submit an application."), "SCHOLARSHIP"),
+    ("undergraduate scholarships", RawSearchResult("National Student Scholarship", "https://education.gov.example/funding/student", "Government scholarship funding with application eligibility and deadline details."), "SCHOLARSHIP"),
+    ("chemistry research program", RawSearchResult("Student Chemistry Research Experience", "https://research-foundation.org/program", "Apply for a mentored chemistry research program with laboratory projects."), "RESEARCH"),
+    ("chemistry summer school", RawSearchResult("Chemistry Summer Academy", "https://summerchemistry.org/apply", "Students can apply to attend this chemistry summer school; program dates are listed."), "SUMMER_SCHOOL"),
+    ("engineering internship", RawSearchResult("Student Engineering Internship", "https://engineers-foundation.org/internship", "Applications are open for student engineering intern positions and placements."), "INTERNSHIP"),
+    ("chemical engineering bachelor", RawSearchResult("BSc Chemical Engineering", "https://www.example.edu/study/chemical-engineering", "Bachelor of Science degree curriculum, entry requirements, admissions and application."), "UNIVERSITY_PROGRAM"),
+    ("STEM volunteering", RawSearchResult("Student STEM Volunteer Program", "https://stemvolunteers.org/join", "Join this STEM volunteer opportunity; participant registration is open."), "VOLUNTEERING"),
+    ("programming course", RawSearchResult("Online Programming Course", "https://learning.example.org/programming", "Enroll in the student programming course and earn a certificate."), "COURSE"),
+    ("English language program", RawSearchResult("English Language Programme", "https://languages.example.org/english", "Register and enroll in the English language program; applications are open."), "LANGUAGE_PROGRAM"),
+])
+def test_actionable_categories_qualify(query, result, expected_type):
+    data, reason = qualify(result, query)
+    assert data is not None, reason
+    assert data["opportunity_type"] == expected_type
+
+
+@pytest.mark.parametrize(("query", "result", "reason"), [
+    ("essay competitions", RawSearchResult("How to win an essay competition", "https://writers.example/advice", "Essay-writing advice and tips for students."), RejectionReason.GENERAL_INFORMATION),
+    ("essay competitions", RawSearchResult("Past Winning Essays Archive", "https://essayprize.org/archive", "Winning essays and sample essays from the student essay competition."), RejectionReason.RESOURCE_PAGE),
+    ("scholarships", RawSearchResult("50 Best Scholarships for Students", "https://publisher.example/scholarships", "A list of scholarship opportunities."), RejectionReason.DIRECTORY_OR_LISTICLE),
+    ("chemistry scholarships", RawSearchResult("History Student Scholarship", "https://www.example.edu/history/funding", "History students can apply for scholarship funding and tuition support."), RejectionReason.SUBJECT_MISMATCH),
+    ("research programs", RawSearchResult("University Research News", "https://www.example.edu/news/research", "An article about scientific research projects and discoveries."), RejectionReason.NEWS_OR_BLOG),
+    ("summer school", RawSearchResult("University Summer News", "https://www.example.edu/news/summer", "News article recapping events held by the university."), RejectionReason.NEWS_OR_BLOG),
+    ("internships", RawSearchResult("Career advice for internships", "https://careers.example/advice", "Tips for finding an internship position and writing applications."), RejectionReason.GENERAL_INFORMATION),
+    ("chemistry undergraduate program", RawSearchResult("Department of Chemistry", "https://www.example.edu/chemistry", "Faculty, research, news, and educational resources."), RejectionReason.GENERAL_INFORMATION),
+    ("volunteering opportunities", RawSearchResult("Volunteer advice for students", "https://publisher.example/volunteer-advice", "A guide to finding community service."), RejectionReason.GENERAL_INFORMATION),
+    ("chemistry course", RawSearchResult("Chemistry Learning Resources", "https://learn.example/resources", "Practice tests, solutions, and chemistry course materials."), RejectionReason.RESOURCE_PAGE),
+    ("chemistry scholarships", RawSearchResult("Chemistry Olympiad", "https://chemistryolympiad.org/register", "Register for this chemistry olympiad competition."), RejectionReason.TYPE_MISMATCH),
+])
+def test_non_actionable_or_mismatched_results_are_rejected(query, result, reason):
+    assert qualify(result, query) == (None, reason)
+
+
+def test_broad_queries_do_not_invent_subject_or_unknown_facts():
+    result = RawSearchResult(
+        "International Excellence Scholarship",
+        "https://www.example.edu/funding/excellence",
+        "International students may apply; scholarship eligibility is available on the application page.",
+    )
+    data, reason = qualify(result, "scholarships for international students")
+    assert data is not None, reason
+    assert json.loads(data["fields"]) == []
+    assert data["field_restriction"] is False
+    assert data["deadline"] is data["funding_amount_text"] is data["language_requirements"] is None
+    assert data["country"] == "Unknown"
+    assert data["provider"] == ""
+    assert json.loads(data["eligible_countries"]) == []
+
+
+def test_type_detection_uses_specific_semantic_variants():
+    cases = {
+        "young writers contest": "COMPETITION",
+        "student essay award application": "COMPETITION",
+        "merit award tuition funding for applicants": "SCHOLARSHIP",
+        "summer research experience": "RESEARCH",
+        "international summer programme": "SUMMER_SCHOOL",
+        "research internship": "INTERNSHIP",
+        "Bachelor of Science degree": "UNIVERSITY_PROGRAM",
+        "IELTS preparation programme": "LANGUAGE_PROGRAM",
+    }
+    for text, expected in cases.items():
+        assert detect_opportunity_type(text) == expected
+    assert detect_opportunity_type("university research news") is None
+    assert requested_domains("scholarships for international students") == []
+
+
+def test_search_query_keeps_intent_and_uses_one_actionable_hint():
+    assert search_query("chemistry scholarship") == "chemistry scholarship official apply"
+    assert search_query("essay competition official") == "essay competition official"
+    assert search_query("chemistry news") == "chemistry news"
