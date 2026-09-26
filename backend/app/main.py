@@ -142,7 +142,11 @@ def opportunities(search:str='',opportunity_type:str='',country:str='',funding:s
    records=[o for o in records if o.source_type=='DEMO' and (not typ or o.opportunity_type==typ) and (not domains or any(field_relevance(d,j(o.fields))>=70 for d in domains))]
  data=[opportunity_view(p,g,o,gs,r) for o in records]
  # Search operates on the eligible universe; recommendation thresholds only shape feeds.
- if search:data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE']
+ if search:
+  # Explicit search should show qualified source-backed results even when
+  # the student's current profile is not eligible. Eligibility is displayed
+  # as a personal assessment instead of hiding the opportunity.
+  pass
  elif sort=='recommended':data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE' and x['field_relevance']>=35]
  key={'readiness':'readiness_score','deadline':'deadline','impact':'gap_impact_score'}.get(sort,'match_score');return sorted(data,key=lambda x:(x[key] is not None,x[key]),reverse=sort!='deadline')
 @app.post('/api/opportunities/discover')
