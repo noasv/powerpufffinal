@@ -348,3 +348,32 @@ def test_parse_goal_repairs_degree_used_as_target_field(monkeypatch):
     data = response.json()
     assert data['target_field'] == 'Chemistry'
     assert data['education_level'] == 'BACHELOR'
+
+def test_explicit_external_search_is_not_filtered_by_active_goal(monkeypatch):
+    """Qualification results remain visible; goal fit is a separate assessment."""
+    h = economics_user('explicit-search-different-goal@example.com')
+    with SessionLocal() as db:
+        result = Opportunity(
+            title='National Chemistry Challenge', provider='Science Foundation',
+            opportunity_type='COMPETITION', description='Students can register.',
+            fields='["Chemistry"]', field_restriction=True,
+            source_type='CONCRETE_OPPORTUNITY', source_label='Source Found',
+            source_url='https://chemistry.example/apply',
+            official_url='https://chemistry.example/apply',
+            canonical_source_url='https://chemistry.example/apply',
+            source_domain='chemistry.example', verification_status='SOURCE_FOUND',
+        )
+        db.add(result); db.commit(); result_id = result.id
+
+    def mocked_discover(db, query):
+        return {'mode': 'EXTERNAL', 'fallback_used': False, 'error': None,
+                'raw_result_count': 1, 'rejected_count': 0,
+                'admitted': [db.get(Opportunity, result_id)],
+                'rejection_summary': {}}
+
+    monkeypatch.setattr('app.main.discover', mocked_discover)
+    response = client.get('/api/opportunities', headers=h,
+                          params={'search': 'chemistry competition'})
+    assert response.status_code == 200
+    assert [item['id'] for item in response.json()] == [result_id]
+    assert response.json()[0]['eligibility_status'] == 'NOT_ELIGIBLE'
