@@ -53,9 +53,22 @@ PARTICIPATION=re.compile(
  r"competitors?|open to|deadline|submission|submit|join)\b",
  re.I,
 )
+# These patterns apply to the result title, where search results state the
+# page's primary purpose.  Applying them to an entire snippet would reject a
+# real program merely because its description links to an application guide.
+DIRECTORY_TITLE=re.compile(
+ r"\b(complete\s+(?:\d{4}\s+)?guide|guide to|best (?:\d+\s+)?(?:summer )?programs?|"
+ r"top\s+\d+|list of|opportunities list|programs? for (?:high school )?students|"
+ r"roundup|directory|database|search tool)\b",
+ re.I,
+)
+RESOURCE_TITLE=re.compile(
+ r"\b(resources?|resource (?:center|centre|list)|how to (?:find|apply)|tips|advice|explained|overview)\b",
+ re.I,
+)
 TYPE_ACTIONS={
  "COMPETITION":re.compile(r"\b(enter|register|registration|participate|submit|submission|deadline|eligibility|rules|prizes?|open to|compete|competition|contest|olympiad)\b",re.I),
- "SCHOLARSHIP":re.compile(r"\b(apply|applications?|eligibility|funding|tuition|financial support|deadline|amount|open to|applicants?)\b",re.I),
+ "SCHOLARSHIP":re.compile(r"\b(apply|applications?|application deadline|eligibility|eligible students?|award|merit|funding|tuition(?: waiver)?|financial support|financial award|scholarships?|studentship|grants?|deadline|amount|open to|applicants?)\b",re.I),
  "RESEARCH":re.compile(r"\b(apply|applications?|participants?|mentor|laborator(y|ies)|projects?|placement|open to)\b",re.I),
  "SUMMER_SCHOOL":re.compile(r"\b(apply|applications?|register|registration|enroll|dates?|participants?|open to|attend)\b",re.I),
  "INTERNSHIP":re.compile(r"\b(apply|applications?|interns?|placement|positions?|eligibility|open to)\b",re.I),
@@ -85,7 +98,7 @@ def classify(result:RawSearchResult)->ResultCategory:
  if _in(domain,SOCIAL):return ResultCategory.SOCIAL_MEDIA
  if _in(domain,FORUMS) or "forum" in domain:return ResultCategory.FORUM
  if _in(domain,AGGREGATORS):return ResultCategory.SEARCH_AGGREGATOR
- if LISTICLE.search(text):return ResultCategory.DIRECTORY_OR_LISTICLE
+ if LISTICLE.search(result.title):return ResultCategory.DIRECTORY_OR_LISTICLE
  if _in(domain,BLOG_HOSTS) or NEWS.search(result.title) or re.search(r"/(blog|news|articles?|posts?)/",path):return ResultCategory.NEWS_OR_BLOG
  if ADVICE.search(result.title):return ResultCategory.GENERAL_INFORMATION
  if not CONCRETE.search(text):return ResultCategory.GENERAL_INFORMATION
@@ -128,13 +141,24 @@ def qualify(result:RawSearchResult,query:str):
  evidence=f"{result.title} {result.snippet}"
  if not canonicalize_url(result.url):return None,RejectionReason.INVALID_URL
  if RESOURCE_ONLY.search(evidence):return None,RejectionReason.RESOURCE_PAGE
+ # A title is the strongest available signal for whether this hit represents
+ # one opportunity or a page whose purpose is discovery/advice.
+ if RESOURCE_TITLE.search(result.title):return None,RejectionReason.RESOURCE_PAGE
+ if DIRECTORY_TITLE.search(result.title):return None,RejectionReason.DIRECTORY_OR_LISTICLE
+ query_type=detect_opportunity_type(query);typ=detect_opportunity_type(evidence)
  # Search snippets for first-party homepages often use an organization's name
  # as the title. Strong, explicit participation language is enough to identify
  # a concrete opportunity even when that name does not resemble its domain.
  if category==ResultCategory.UNKNOWN and CONCRETE.search(evidence) and PARTICIPATION.search(evidence):
   category=ResultCategory.CONCRETE_OPPORTUNITY
+ # Awards and funding programs do not always put the literal word
+ # "scholarship" in their name.  A scholarship-intent query plus contextual
+ # funding/type detection and an application or eligibility signal is enough
+ # to treat the page as a candidate.  Generic financial-aid information still
+ # fails because it has no participation signal.
+ if category in {ResultCategory.UNKNOWN,ResultCategory.GENERAL_INFORMATION} and query_type=="SCHOLARSHIP" and typ=="SCHOLARSHIP" and _has_actionable_evidence(typ,evidence) and PARTICIPATION.search(evidence):
+  category=ResultCategory.OFFICIAL_OPPORTUNITY_PAGE if (domain_of(result.url).endswith(".edu") or re.search(r"(^|\.)(ac|edu|gov)\.[a-z.]+$",domain_of(result.url))) else ResultCategory.CONCRETE_OPPORTUNITY
  if category not in {ResultCategory.CONCRETE_OPPORTUNITY,ResultCategory.OFFICIAL_OPPORTUNITY_PAGE}:return None,_reason_for_category(category)
- query_type=detect_opportunity_type(query);typ=detect_opportunity_type(evidence)
  domains=requested_domains(query)
  if not typ or (query_type and typ!=query_type):return None,RejectionReason.TYPE_MISMATCH
  # Explicit query intent is strict: the result must contain the requested subject

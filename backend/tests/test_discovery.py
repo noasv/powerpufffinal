@@ -182,3 +182,75 @@ def test_search_query_keeps_intent_and_uses_one_actionable_hint():
     assert search_query("chemistry scholarship") == "chemistry scholarship official apply"
     assert search_query("essay competition official") == "essay competition official"
     assert search_query("chemistry news") == "chemistry news"
+
+
+@pytest.mark.parametrize("result", [
+    RawSearchResult(
+        "International Student Scholarship",
+        "https://www.example.edu/international/scholarship",
+        "International students may apply for this tuition scholarship; eligibility and the application deadline are listed.",
+    ),
+    RawSearchResult(
+        "Global Scholars Programme",
+        "https://education.gov.uk/global-scholars",
+        "Government funding for eligible international students. Applications are now open.",
+    ),
+    RawSearchResult(
+        "International Excellence Award",
+        "https://globalfoundation.org/excellence-award",
+        "A tuition funding award for eligible international students; submit an application by the deadline.",
+    ),
+])
+def test_contextual_international_scholarships_qualify(result):
+    data, reason = qualify(result, "scholarships for international students")
+    assert data is not None, reason
+    assert data["opportunity_type"] == "SCHOLARSHIP"
+    assert json.loads(data["fields"]) == []
+    assert data["field_restriction"] is False
+
+
+def test_international_students_is_audience_not_subject():
+    assert requested_domains("scholarships for international students") == []
+    data, reason = qualify(
+        RawSearchResult(
+            "International Merit Award",
+            "https://awardsfoundation.org/international-merit",
+            "Eligible students can apply for tuition funding.",
+        ),
+        "scholarships for international students",
+    )
+    assert data is not None, reason
+    assert json.loads(data["fields"]) == []
+
+
+@pytest.mark.parametrize(("result", "expected"), [
+    (RawSearchResult("Financial Aid Information", "https://www.example.edu/financial-aid", "Information about student loans, costs, and paying for college."), RejectionReason.GENERAL_INFORMATION),
+    (RawSearchResult("25 Scholarships for International Students", "https://publisher.example/scholarships", "The best awards and grants, with application advice."), RejectionReason.DIRECTORY_OR_LISTICLE),
+    (RawSearchResult("Scholarship Search Database", "https://foundation.example/search", "Search thousands of scholarships and funding opportunities."), RejectionReason.DIRECTORY_OR_LISTICLE),
+])
+def test_scholarship_information_and_discovery_pages_are_rejected(result, expected):
+    assert qualify(result, "scholarships for international students") == (None, expected)
+
+
+@pytest.mark.parametrize(("query", "result", "expected"), [
+    ("summer school for high school students", RawSearchResult("Complete Guide to Summer Programs for High School Students", "https://publisher.example/summer-guide", "Explore programs, application tips, and advice."), RejectionReason.DIRECTORY_OR_LISTICLE),
+    ("high school internship", RawSearchResult("High School Internship Resources", "https://careers.example/internship-resources", "Resources for finding internships and preparing applications."), RejectionReason.RESOURCE_PAGE),
+    ("high school internship", RawSearchResult("Top 20 Internships for Students", "https://publisher.example/top-internships", "The best internship opportunities and how to apply."), RejectionReason.DIRECTORY_OR_LISTICLE),
+])
+def test_editorial_and_resource_pages_are_not_opportunity_cards(query, result, expected):
+    assert qualify(result, query) == (None, expected)
+
+
+@pytest.mark.parametrize(("query", "result", "expected_type"), [
+    ("high school internship", RawSearchResult("2027 High School Summer Internship Program", "https://sciencecenter.org/internship", "High school interns can apply for positions; eligibility requirements are listed."), "INTERNSHIP"),
+    ("summer school for high school students", RawSearchResult("Career Edge High School Summer Program", "https://www.example.edu/career-edge", "Students can apply and enroll in this summer program; dates and eligibility are listed."), "SUMMER_SCHOOL"),
+    ("chemistry olympiad", RawSearchResult("National Chemistry Olympiad", "https://chemistryolympiad.org/enter", "Students can register for the chemistry olympiad competition."), "COMPETITION"),
+    ("essay competition", RawSearchResult("International Student Essay Competition", "https://essayfoundation.org/competition", "Students may enter and submit an essay by the deadline."), "COMPETITION"),
+    ("chemistry research program", RawSearchResult("Undergraduate Chemistry Research Program", "https://www.example.edu/chemistry/research", "Students may apply for mentored laboratory projects."), "RESEARCH"),
+    ("chemical engineering bachelor", RawSearchResult("Bachelor of Chemical Engineering", "https://www.example.edu/engineering/chemical", "Apply for admission; curriculum and entry requirements are available."), "UNIVERSITY_PROGRAM"),
+    ("volunteering for students", RawSearchResult("Semester of Service Student Volunteer Program", "https://servicefoundation.org/semester", "Students can join this volunteer program; registration is open."), "VOLUNTEERING"),
+])
+def test_concrete_opportunity_regressions_remain_qualified(query, result, expected_type):
+    data, reason = qualify(result, query)
+    assert data is not None, reason
+    assert data["opportunity_type"] == expected_type
