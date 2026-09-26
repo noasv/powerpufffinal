@@ -133,4 +133,5 @@ def discover(db:Session,query:str,provider=None):
  except Exception as exc:
   return {'mode':'DEMO','fallback_used':True,'error':f'External provider unavailable: {type(exc).__name__}','raw_result_count':0,'rejected_count':0,'admitted':[]}
  admitted,rejected=persist_candidates(db,raw,query)
+ print(f'DISCOVERY DEBUG: query={query!r} raw={len(raw)} rejected={len(rejected)} admitted={len(admitted)}', flush=True)
  return {'mode':'EXTERNAL','fallback_used':False,'error':None,'raw_result_count':len(raw),'rejected_count':len(rejected),'admitted':admitted,'rejections':rejected}
