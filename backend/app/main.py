@@ -15,8 +15,8 @@ from .services.engines import *
 from .services.ai import ai
 from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean,requested_domains
 from .services.discovery import discover
+from .services.advisor_intent import parse_advisor_opportunity_intent
 from .services.reviewer import ApplicationReview,deterministic_review,rubric_for,validate_provider_review
-from .services.discovery import discover
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 passwords=PasswordHash.recommended();oauth=OAuth2PasswordBearer(tokenUrl='/api/auth/login')
@@ -239,10 +239,10 @@ def _advisor_answer(raw, candidates, search_intent, domains=None):
   answer='I searched the source-backed opportunity pipeline.'
   if verified:
    # Provider prose is untrusted too: render only deterministic candidate facts.
-   facts=' Matching opportunities: '+'; '.join(f"{opp['title']} ({opp['verification_status']})" for opp,_reason in verified)+'.'
+   facts=' Matching opportunities: '+'; '.join(_advisor_opportunity_fact(opp) for opp,_reason in verified)+'.'
   elif candidates:
    # A malformed provider response cannot erase verified search results.
-   facts=' Matching opportunities: '+'; '.join(f"{opp['title']} ({opp['verification_status']})." for opp in candidates[:5])
+   facts=' Matching opportunities: '+'; '.join(_advisor_opportunity_fact(opp) for opp in candidates[:5])+'.'
   else:
    facts=" No matching source-backed opportunity was found. I will not invent one."
   if domains:
@@ -255,43 +255,49 @@ def _advisor_answer(raw, candidates, search_intent, domains=None):
   answer=(answer+' '+facts).strip()
  return answer, [opp['id'] for opp,_ in verified] or ([o['id'] for o in candidates[:5]] if search_intent else [])
 
+def _advisor_opportunity_fact(opp):
+ return (f"{opp['title']} ({opp['type'].replace('_',' ').title()}; "
+         f"fields: {', '.join(opp['fields']) or 'not specified'}; source-backed: {opp['verification_status']}; "
+         f"subject relevance: {opp['field_relevance']}; "
+         f"personal match: {opp['match_score']}; eligibility: {opp['eligibility']}; "
+         f"gap impact: {opp['gap_impact']})")
+
+def _advisor_candidates(all_opps,views,intent,search_intent):
+ requested_fields=list(intent.subjects)
+ candidates=[]
+ for opp,view in zip(all_opps,views):
+  if not search_intent and view['eligibility_status']=='NOT_ELIGIBLE':continue
+  relevance=max((field_relevance(field,j(opp.fields)) for field in requested_fields),default=view['field_relevance'])
+  if search_intent and requested_fields and relevance<70:continue
+  if intent.requested_type and opp.opportunity_type!=intent.requested_type:continue
+  if intent.allowed_types and opp.opportunity_type not in intent.allowed_types:continue
+  if opp.verification_status not in ('VERIFIED','SOURCE_FOUND','DEMO'):continue
+  candidates.append({'id':opp.id,'title':opp.title,'provider':opp.provider,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_url':opp.source_url,'source_label':opp.source_label,'verification_status':opp.verification_status})
+ candidates.sort(key=lambda z:(z['field_relevance'],z['match_score']),reverse=True)
+ return candidates[:8]
+
 @app.post('/api/ai/advisor')
 def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:raise HTTPException(409,'Complete onboarding before using the advisor')
- question=x.question.lower();requested_type=detect_opportunity_type(question);domains=requested_domains(question)
- opportunity_words=('opportunit','olympiad','competition','scholarship','program','extracurricular')
- search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
- discovery_state=None;external_candidate_ids=None
- if search_intent and settings.opportunity_discovery_provider.lower()=='serper':
-  discovery_state=discover(db,x.question)
-  if discovery_state['mode']=='EXTERNAL':external_candidate_ids={o.id for o in discovery_state['admitted']}
+ intent=parse_advisor_opportunity_intent(x.question,g.target_field);search_intent=intent.is_discovery
+ discovery_state=None
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first()
  tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else []
  requirements=db.query(Requirement).filter_by(goal_id=g.id).all()
  all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
  context={'user':{'id':u.id,'name':u.name},'profile':profile_dict(p),'goal':{'id':g.id,'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'requirements':[{'category':z.category,'name':z.name,'target':z.target_value,'source_type':z.source_type} for z in requirements],'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state,'evidence':z.evidence} for z in gs if z.status=='OPEN'],'resolved_gaps':[{'title':z.title,'category':z.category} for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':{'title':road.title if road else None,'tasks':[{'title':z.title,'status':z.status,'due_date':str(z.due_date),'opportunity_id':z.opportunity_id} for z in tasks]}}
- requested_fields=domains or [g.target_field]
- requested_gap='EXTRACURRICULAR' if 'extracurricular' in question else None
- candidates=[]
- for opp,view in zip(all_opps,views):
-  if external_candidate_ids is not None and opp.id not in external_candidate_ids:continue
-  # For explicit external searches, search relevance takes priority over the
-  # user's active goal. Keep a source-backed result even when the active goal
-  # makes its personal eligibility/match low; the UI can still show that
-  # personal assessment separately.
-  if external_candidate_ids is None and view['eligibility_status']=='NOT_ELIGIBLE':continue
-  relevance=max(field_relevance(field,j(opp.fields)) for field in requested_fields)
-  if search_intent and relevance<70:continue
-  if requested_type and opp.opportunity_type!=requested_type:continue
-  if requested_gap and requested_gap not in j(opp.gap_categories):continue
-  if opp.verification_status not in ('VERIFIED','SOURCE_FOUND','DEMO'):continue
-  candidates.append({'id':opp.id,'title':opp.title,'provider':opp.provider,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_url':opp.source_url,'source_label':opp.source_label,'verification_status':opp.verification_status})
- candidates.sort(key=lambda z:(z['field_relevance'],z['match_score']),reverse=True);candidates=candidates[:8]
+ candidates=_advisor_candidates(all_opps,views,intent,search_intent)
+ # Stored, admitted records are always checked first.  At most one normalized
+ # external search is made, and only when no stored record satisfies intent.
+ if search_intent and not candidates and settings.opportunity_discovery_provider.lower()=='serper':
+  discovery_state=discover(db,intent.discovery_query)
+  all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
+  candidates=_advisor_candidates(all_opps,views,intent,search_intent)
  prompt={'instructions':['Answer the question using only this authenticated user context.','Return JSON with answer, recommendations [{id, reason}], and general_suggestions.','Recommendation ids must come from candidate_opportunities. Do not put opportunity names, URLs, eligibility, or deadlines in answer; the server renders stored facts.','General suggestions must be activity categories, never invented named opportunities, and must be clearly non-Pathly.'],'question':x.question,'context':context,'candidate_opportunities':candidates}
  try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt, default=str))
  except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt, default=str));ai.last_fallback=True;ai.last_active_provider='mock'
- answer,ids=_advisor_answer(raw,candidates,search_intent,requested_fields if domains else None)
+ answer,ids=_advisor_answer(raw,candidates,search_intent,list(intent.subjects) if intent.subjects else None)
  selected=[opportunity_view(p,g,o,gs,r) for o in all_opps if o.id in ids]
  response={'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'opportunities':selected,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
  if discovery_state:
