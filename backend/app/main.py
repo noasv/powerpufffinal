@@ -98,8 +98,20 @@ def put_profile(x:ProfileIn,u=Depends(current),db:Session=Depends(get_db)):
  db.commit();return {'profile':profile_dict(p),'readiness':data}
 @app.post('/api/ai/parse-goal')
 def parse_goal(x:ParseIn,u=Depends(current)):
- try:return {**json.loads(ai.complete('PARSE_GOAL '+x.text)),'demo_ai':ai.fallback_active}
- except Exception:return {'goal_type':'UNIVERSITY_ADMISSION','target_field':'General Studies','target_regions':[],'language':'English','funding_requirement':'MEDIUM','education_level':'BACHELOR','confidence':.5,'demo_ai':True}
+ try:
+  parsed=json.loads(ai.complete('PARSE_GOAL '+x.text))
+  field=str(parsed.get('target_field') or '').strip()
+  invalid_levels={'bachelor','bachelors','master','masters','phd','doctorate','undergraduate','graduate'}
+  if not field or clean(field) in invalid_levels:
+   domains=requested_domains(x.text)
+   field=domains[0] if domains else 'General'
+  else:
+   field=canonical_domain(field)
+  parsed['target_field']=field
+  return {**parsed,'demo_ai':ai.fallback_active}
+ except Exception:
+  domains=requested_domains(x.text)
+  return {'goal_type':'UNIVERSITY_ADMISSION','target_field':domains[0] if domains else 'General','target_regions':[],'language':'English','funding_requirement':'MEDIUM','education_level':'BACHELOR','confidence':.5,'demo_ai':True}
 @app.get('/api/goals')
 def goals(u=Depends(current),db:Session=Depends(get_db)):return db.query(Goal).filter_by(user_id=u.id).all()
 @app.post('/api/goals')

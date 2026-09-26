@@ -317,3 +317,34 @@ def test_goal_field_rejects_education_level():
 
     with pytest.raises(ValidationError):
         GoalIn(title="Bachelor Abroad", target_field="Bachelor")
+
+def test_parse_goal_repairs_degree_used_as_target_field(monkeypatch):
+    import json
+    from app.main import ai
+
+    h = auth_setup('parse-goal-repair@example.com')
+
+    monkeypatch.setattr(
+        ai,
+        'complete',
+        lambda _: json.dumps({
+            'goal_type': 'UNIVERSITY_ADMISSION',
+            'target_field': 'Bachelor',
+            'target_regions': ['Europe'],
+            'language': 'English',
+            'funding_requirement': 'HIGH',
+            'education_level': 'BACHELOR',
+            'confidence': 0.9,
+        }),
+    )
+
+    response = client.post(
+        '/api/ai/parse-goal',
+        headers=h,
+        json={'text': 'I want a Bachelor in Chemistry abroad'},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data['target_field'] == 'Chemistry'
+    assert data['education_level'] == 'BACHELOR'
