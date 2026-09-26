@@ -232,8 +232,8 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
   candidates.append({'id':opp.id,'title':opp.title,'provider':opp.provider,'type':opp.opportunity_type,'fields':j(opp.fields),'gap_categories':j(opp.gap_categories),'field_relevance':relevance,'match_score':view['match_score'],'eligibility':view['eligibility_status'],'gap_impact':view['gap_impact'],'deadline':str(opp.deadline) if opp.deadline else None,'source_url':opp.source_url,'source_label':opp.source_label,'verification_status':opp.verification_status})
  candidates.sort(key=lambda z:(z['field_relevance'],z['match_score']),reverse=True);candidates=candidates[:8]
  prompt={'instructions':['Answer the question using only this authenticated user context.','Return JSON with answer, recommendations [{id, reason}], and general_suggestions.','Recommendation ids must come from candidate_opportunities. Do not put opportunity names, URLs, eligibility, or deadlines in answer; the server renders stored facts.','General suggestions must be activity categories, never invented named opportunities, and must be clearly non-Pathly.'],'question':x.question,'context':context,'candidate_opportunities':candidates}
- try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
- except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt));ai.last_fallback=True;ai.last_active_provider='mock'
+ try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt, default=str))
+ except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt, default=str));ai.last_fallback=True;ai.last_active_provider='mock'
  answer,ids=_advisor_answer(raw,candidates,search_intent,requested_fields if domains else None)
  selected=[opportunity_view(p,g,o,gs,r) for o in all_opps if o.id in ids]
  return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'opportunities':selected,'discovery':({'mode':discovery_result.mode,'fallback_used':discovery_result.fallback_used,'error':discovery_result.error,'request':discovery_result.request.model_dump()} if discovery_result else None),'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}

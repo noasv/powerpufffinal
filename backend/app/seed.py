@@ -50,7 +50,7 @@ def seed():
   canonical={'birth_year':date.today().year-16,'country':'Kazakhstan','city':'','education_level':'HIGH_SCHOOL','grade_year':'11','gpa':3.8,'gpa_scale':4,'english_level':'B2','ielts_score':None,'budget_level':'LOW','preferred_countries':json.dumps(['Germany','Netherlands','International']),'preferred_fields':json.dumps(['Chemical Engineering']),'skills':json.dumps(['Chemistry','Mathematics']),'interests':json.dumps(['Sustainability']),'achievements':'Strong chemistry grades.','projects':'School chemistry project.','volunteering':'One school volunteering activity.','extracurriculars':'Chemistry club.','research_experience':'','work_experience':''}
   for key,value in canonical.items():setattr(p,key,value)
   g=db.query(Goal).filter_by(user_id=u.id,status='ACTIVE').first()
-  if not g:g=Goal(user_id=u.id);db.add(g);db.flush()
+  if not g:g=Goal(user_id=u.id,title='Chemical Engineering in Europe');db.add(g);db.flush()
   db.query(Goal).filter(Goal.user_id==u.id,Goal.id!=g.id,Goal.status=='ACTIVE').update({'status':'PAUSED'},synchronize_session=False)
   g.title='Chemical Engineering in Europe';g.description='Study Chemical Engineering in Europe in English with substantial financial support.';g.target_field='Chemical Engineering';g.target_countries=json.dumps(['Germany','Netherlands']);g.funding_requirement='HIGH';g.education_level='BACHELOR';g.language='English';g.target_date=date.today()+timedelta(days=365);g.status='ACTIVE'
   if not db.query(Requirement).filter_by(goal_id=g.id).first():
