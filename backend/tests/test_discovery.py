@@ -62,3 +62,15 @@ def test_subject_aliases_and_types_are_strict_and_generalize():
   data,_=qualify(result,'find '+words)
   assert data and json.loads(data['fields'])==[domain]
  assert canonical_domain('physics')=='Physics'
+
+def test_problem_bank_is_not_admitted_as_opportunity():
+    result = RawSearchResult(
+        "MathNet - Explore 30,000+ Olympiad Math Problems",
+        "https://mathnet.example/problems",
+        "Explore 30,000+ olympiad math problems, solutions and practice materials.",
+    )
+
+    data, category = qualify(result, "find math olympiads")
+
+    assert data is None
+    assert category == ResultCategory.GENERAL_INFORMATION

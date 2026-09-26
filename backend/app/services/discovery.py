@@ -31,6 +31,22 @@ ADVICE=re.compile(r"\b(how to|guide to|tips for|what is|why (join|enter)|ranking
 NEWS=re.compile(r"\b(news|blog|article|announces?|winners?|results?|recap)\b",re.I)
 CONCRETE=re.compile(r"\b(olympiad|competition|challenge|scholarship|fellowship|internship|summer school|research program|exchange program|award|grant|bursary)\b",re.I)
 
+# Search results can mention a real competition while actually pointing to a
+# problem bank, archive, study resource, or informational page. These pages
+# are useful resources, but they are not actionable Opportunity records.
+RESOURCE_ONLY=re.compile(
+ r"\b(problem bank|problem archive|past problems?|practice problems?|"
+ r"practice questions?|solutions? archive|study materials?|learning resources?|"
+ r"collection of .* problems?|explore [\d,]+\+? .*problems?)\b",
+ re.I,
+)
+PARTICIPATION=re.compile(
+ r"\b(register|registration|apply|application|participate|participant|"
+ r"eligibility|eligible|enroll|enrollment|enter|competition|contest|"
+ r"students? compete|open to|deadline|submission)\b",
+ re.I,
+)
+
 def domain_of(url:str)->str:
  try:return urlsplit(url).hostname.lower().removeprefix("www.")
  except (AttributeError,ValueError):return ""
@@ -76,6 +92,14 @@ def qualify(result:RawSearchResult,query:str):
  # in its visible search evidence, rather than inheriting it by assumption.
  evidence=clean(f"{result.title} {result.snippet}")
  if not any(any(clean(alias) in evidence for alias in DOMAIN_ALIASES[d]) for d in domains):return None,ResultCategory.GENERAL_INFORMATION
+
+ # A search hit about an opportunity is not necessarily an opportunity itself.
+ # Reject obvious archives/problem banks unless the visible evidence also
+ # contains a concrete participation signal.
+ raw_evidence=f"{result.title} {result.snippet}"
+ if RESOURCE_ONLY.search(raw_evidence) and not PARTICIPATION.search(raw_evidence):
+  return None,ResultCategory.GENERAL_INFORMATION
+
  url=canonicalize_url(result.url); domain=domain_of(url); first=category==ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
  return {'title':_title(result.title),'provider':_provider(result),'opportunity_type':typ,'description':result.snippet.strip() or 'Source page found; details have not yet been extracted.','official_url':url,'country':'Unknown','delivery_mode':'UNKNOWN','eligible_countries':'[]','education_levels':'[]','fields':json.dumps(domains),'field_restriction':True,'funding_type':'UNKNOWN','funding_amount_text':None,'cost_text':None,'language_requirements':None,'deadline':None,'requirements_text':'','source_label':'Source Found','gap_categories':'[]','source_url':url,'source_type':category.value,'source_domain':domain,'verification_status':'SOURCE_FOUND','discovered_at':datetime.utcnow(),'canonical_source_url':url,'discovery_source_url':url,'source_quality':'FIRST_PARTY' if first else 'CREDIBLE_SOURCE','is_first_party':first,'verification_notes':'Search evidence identifies a concrete opportunity; structured facts remain unverified.','last_checked_at':datetime.utcnow()},category
 
