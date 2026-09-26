@@ -1,7 +1,8 @@
+import pytest
 import json
 from app.database import Base,engine,SessionLocal
 from app.models import Opportunity
-from app.services.discovery import RawSearchResult,ResultCategory,classify,discover,persist_candidates,qualify
+from app.services.discovery import RawSearchResult,RejectionReason,ResultCategory,classify,discover,persist_candidates,qualify
 from app.services.domains import canonical_domain,requested_domains
 
 def setup_function():
@@ -36,7 +37,7 @@ def test_duplicate_official_representations_collapse():
  raw=[RawSearchResult('International Mathematical Olympiad | Official Site','https://imo-official.org/','Official mathematics olympiad competition'),RawSearchResult('International Mathematical Olympiad | IMO','https://imo-official.org/?ref=search','Official mathematics olympiad competition')]
  with SessionLocal() as db:
   admitted,rejected=persist_candidates(db,raw,'math olympiads')
-  assert len(admitted)==1 and len(rejected)==1 and rejected[0]['category']=='DUPLICATE'
+  assert len(admitted)==1 and len(rejected)==1 and rejected[0]['reason']=='DUPLICATE'
   assert db.query(Opportunity).count()==1
 
 class Provider:
@@ -65,12 +66,44 @@ def test_subject_aliases_and_types_are_strict_and_generalize():
 
 def test_problem_bank_is_not_admitted_as_opportunity():
     result = RawSearchResult(
-        "MathNet - Explore 30,000+ Olympiad Math Problems",
-        "https://mathnet.example/problems",
-        "Explore 30,000+ olympiad math problems, solutions and practice materials.",
+        "Chemistry Olympiad Past Papers and Problem Archive",
+        "https://chemistry-resources.example/problems",
+        "Chemistry olympiad past problems, solutions and practice materials.",
     )
 
-    data, category = qualify(result, "find math olympiads")
+    data, category = qualify(result, "find chemistry olympiads")
 
     assert data is None
-    assert category == ResultCategory.GENERAL_INFORMATION
+    assert category == RejectionReason.RESOURCE_PAGE
+
+
+@pytest.mark.parametrize(("query", "result", "domain"), [
+    ("chemistry olympiad", RawSearchResult("National Chemistry Olympiad", "https://science-foundation.org/chemistry-olympiad", "High school students can register to participate in this annual chemistry olympiad."), "Chemistry"),
+    ("physics olympiad", RawSearchResult("National Physics Olympiad", "https://physicsolympiad.example/", "Registration is open to students for the annual physics olympiad."), "Physics"),
+    ("economics competition", RawSearchResult("Young Economists Challenge", "https://economists.example/challenge", "Students are eligible to enter this economics competition."), "Economics"),
+])
+def test_subject_specific_actionable_opportunities_qualify(query, result, domain):
+    data, reason = qualify(result, query)
+    assert data is not None, reason
+    assert json.loads(data["fields"]) == [domain]
+
+
+def test_rejection_reasons_distinguish_non_opportunities_and_mismatches():
+    cases = [
+        (RawSearchResult("10 Best Chemistry Olympiads for Students", "https://publisher.example/list", "A ranked list of competitions"), "chemistry olympiad", RejectionReason.DIRECTORY_OR_LISTICLE),
+        (RawSearchResult("Chemistry Olympiad discussion", "https://reddit.com/r/chemistry/1", "How can students enter?"), "chemistry olympiad", RejectionReason.FORUM),
+        (RawSearchResult("Physics Olympiad", "https://physics.example/", "Students can register for this physics competition."), "chemistry olympiad", RejectionReason.SUBJECT_MISMATCH),
+    ]
+    for result, query, expected in cases:
+        assert qualify(result, query) == (None, expected)
+
+
+def test_canonical_duplicate_ignores_www_scheme_query_and_fragment():
+    raw = [
+        RawSearchResult("Chemistry Challenge", "http://www.chemchallenge.example/apply?utm_source=x", "Students can apply for this chemistry competition."),
+        RawSearchResult("Annual Chemical Sciences Challenge", "https://chemchallenge.example/apply#registration", "Students can register for this chemistry competition."),
+    ]
+    with SessionLocal() as db:
+        admitted, rejected = persist_candidates(db, raw, "chemistry competition")
+        assert len(admitted) == 1
+        assert [item["reason"] for item in rejected] == ["DUPLICATE"]
