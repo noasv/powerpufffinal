@@ -103,6 +103,30 @@ Health: `curl http://localhost:8000/api/health`. Swagger provides interactive AP
 
 Passwords are Argon2 hashes; JWTs expire after 12 hours; APIs enforce ownership; Pydantic validates input; ORM queries avoid raw user SQL; secrets are environment-only. AI keys/hashes are never returned. AI must not be treated as authoritative. Stored demo opportunity information is visibly labeled and official links must be checked.
 
+## Real opportunity discovery
+
+Advisor opportunity searches and typed searches on **Opportunities** share one backend pipeline: deterministic query parsing → an `OpportunityDiscoveryProvider` → URL/title validation → normalization and deduplication → persistence/upsert → the existing eligibility, field relevance, Match, Readiness, and Gap Impact engines. The AI provider is separate: it may explain only the candidate IDs supplied by discovery and cannot create an opportunity record or replace its stored facts.
+
+The production adapter uses a server-side [Serper](https://serper.dev/)-compatible web search response. Configure it in the backend environment:
+
+```env
+OPPORTUNITY_DISCOVERY_PROVIDER=serper
+OPPORTUNITY_SEARCH_API_KEY=your_server_side_key
+OPPORTUNITY_SEARCH_BASE_URL=https://google.serper.dev/search
+OPPORTUNITY_SEARCH_TIMEOUT_SECONDS=10
+```
+
+No discovery credential is sent to the browser. Without a key—or after a timeout, HTTP error, or malformed response—the application remains available and searches the offline dataset, but every returned record is labeled **Demo opportunity** and the Advisor reports that live discovery was unavailable. A subject/type search is strict: an empty result is shown rather than substituting IELTS, volunteering, or another unrelated type.
+
+Verification states have deliberately narrow meanings:
+
+* `VERIFIED`: reserved for a future validator that confirms an official first-party page; an LLM or search result alone cannot assign this status.
+* `SOURCE_FOUND`: an external search result with valid HTTP(S) provenance. This confirms that a source was found, not that every snippet fact is current or correct.
+* `UNVERIFIED`: invalid/placeholder provenance or a candidate that cannot meet the stronger source rules; it is excluded from recommendations.
+* `DEMO`: an offline Pathly dataset record, not a live or verified listing.
+
+Unknown external facts—including deadline, funding, eligibility, provider, country, requirements, and delivery mode—remain unknown. Results are upserted by normalized source URL first and title/provider second, so repeated searches do not continually add rows. Users should inspect the linked source before applying.
+
 ## 3-Minute Demo
 
 1. Log in with the demo account.
@@ -118,7 +142,7 @@ Passwords are Argon2 hashes; JWTs expire after 12 hours; APIs enforce ownership;
 
 ## Known MVP limitations
 
-The reliable hackathon dataset is seeded, not a live ingestion feed. Opportunity details need official verification. Readiness is heuristic progress—not admission probability or a guarantee. Real-provider behavior depends on its availability and compatible chat-completions API. SQLite is intended for demo/development; production should use PostgreSQL, a durable job/notification system, and verified ingestion.
+Web search establishes provenance but does not prove that every page is official, current, or complete; therefore the current adapter returns `SOURCE_FOUND`, not `VERIFIED`. Search-result extraction intentionally leaves unavailable structured facts unknown. The offline catalogue supports reliable demonstration but is not live data. Readiness is heuristic progress—not admission probability or a guarantee. Real-provider behavior depends on provider availability. SQLite is intended for demo/development; production should use PostgreSQL, a durable refresh job and a first-party page verification/expiry pipeline.
 
 ## Future development
 

@@ -9,6 +9,9 @@ services:
       AI_MODEL: ${AI_MODEL:-gpt-4o-mini}
       AI_BASE_URL: ${AI_BASE_URL:-https://api.openai.com/v1}
       FRONTEND_URL: http://localhost:5173
+      OPPORTUNITY_DISCOVERY_PROVIDER: ${OPPORTUNITY_DISCOVERY_PROVIDER:-demo}
+      OPPORTUNITY_SEARCH_API_KEY: ${OPPORTUNITY_SEARCH_API_KEY:-}
+      OPPORTUNITY_SEARCH_BASE_URL: ${OPPORTUNITY_SEARCH_BASE_URL:-https://google.serper.dev/search}
     volumes: [pathly_data:/data]
     ports: ["8000:8000"]
   frontend:
