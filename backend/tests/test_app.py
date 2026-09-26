@@ -1,3 +1,4 @@
+import pytest
 import os,tempfile
 os.environ['DATABASE_URL']='sqlite:///'+tempfile.mktemp(suffix='.db')
 from fastapi.testclient import TestClient
@@ -300,3 +301,19 @@ def test_search_results_and_recommendations_are_separate():
  assert not any(x['title']=='IELTS Preparation Path' for x in results)
  recommendations=client.get('/api/opportunities',headers=h).json()
  assert isinstance(recommendations,list)
+
+def test_goal_field_rejects_education_level():
+    from pydantic import ValidationError
+    from app.main import GoalIn
+
+    chemistry = GoalIn(title="Chemistry Abroad", target_field="Chemistry")
+    assert chemistry.target_field == "Chemistry"
+
+    chemical_engineering = GoalIn(
+        title="Chemical Engineering Abroad",
+        target_field="Chemical Engineering",
+    )
+    assert chemical_engineering.target_field == "Chemical Engineering"
+
+    with pytest.raises(ValidationError):
+        GoalIn(title="Bachelor Abroad", target_field="Bachelor")

@@ -4,7 +4,7 @@ from typing import Any
 from fastapi import FastAPI,Depends,HTTPException,Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel,EmailStr,Field
+from pydantic import BaseModel,EmailStr,Field,field_validator
 from pwdlib import PasswordHash
 from sqlalchemy.orm import Session
 from sqlalchemy import text,func
@@ -24,7 +24,26 @@ class Register(BaseModel): name:str=Field(min_length=2);email:EmailStr;password:
 class Login(BaseModel): email:EmailStr;password:str
 class ProfileIn(BaseModel):
  birth_year:int|None=None;country:str='';city:str='';education_level:str='HIGH_SCHOOL';grade_year:str='';gpa:float|None=None;gpa_scale:float=4;english_level:str='B2';ielts_score:float|None=None;sat_score:int|None=None;budget_level:str='LOW';preferred_countries:list[str]=[];preferred_fields:list[str]=[];skills:list[str]=[];interests:list[str]=[];achievements:str='';projects:str='';extracurriculars:str='';volunteering:str='';research_experience:str='';work_experience:str=''
-class GoalIn(BaseModel): title:str;description:str='';goal_type:str='UNIVERSITY_ADMISSION';target_field:str='';target_countries:list[str]=[];target_date:date|None=None;funding_requirement:str='HIGH';education_level:str='BACHELOR';language:str='English'
+class GoalIn(BaseModel):
+ title:str
+ description:str=''
+ goal_type:str='UNIVERSITY_ADMISSION'
+ target_field:str
+ target_countries:list[str]=[]
+ target_date:date|None=None
+ funding_requirement:str='HIGH'
+ education_level:str='BACHELOR'
+ language:str='English'
+
+ @field_validator('target_field')
+ @classmethod
+ def validate_target_field(cls,v:str):
+  value=v.strip()
+  if not value:
+   raise ValueError('Target field is required.')
+  if clean(value) in {'bachelor','bachelors','master','masters','phd','doctorate','undergraduate','graduate'}:
+   raise ValueError('Target field must be a subject or discipline, not an education level.')
+  return canonical_domain(value)
 class ParseIn(BaseModel): text:str=Field(min_length=5)
 class AdvisorIn(BaseModel): question:str=Field(min_length=2)
 class DiscoveryIn(BaseModel): query:str=Field(min_length=3,max_length=300)
