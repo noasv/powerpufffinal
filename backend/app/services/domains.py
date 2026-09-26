@@ -11,6 +11,7 @@ DOMAIN_ALIASES = {
     "Data Science": {"data science", "data analytics", "data analysis"},
     "Physics": {"physics", "astrophysics", "quantum physics"},
     "Chemistry": {"chemistry", "green chemistry", "organic chemistry", "inorganic chemistry", "geochemistry"},
+    "Physics": {"physics", "physical science", "astronomy", "astrophysics"},
     "Geography": {"geography", "geographic", "human geography", "physical geography"},
     "Chemical Engineering": {"chemical engineering", "process engineering", "materials science", "biotechnology"},
     "Engineering": {"engineering", "mechanical engineering", "electrical engineering", "civil engineering", "environmental engineering", "energy engineering"},

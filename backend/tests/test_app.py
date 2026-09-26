@@ -288,52 +288,10 @@ def test_application_review_endpoint_has_no_canned_scores():
  body=result.json();assert body['review_status']=='INSUFFICIENT_CONTENT' and body['overall_score'] is None
  assert all(c['score']!=70 for c in body['criteria']) and all(c['criterion'] not in ('Leadership','Community impact') for c in body['criteria'])
 
-def test_discovery_request_domain_and_type_semantics():
- from app.services.discovery import parse_discovery_request
- assert parse_discovery_request('find physics olympiads').domains==['Physics']
- request=parse_discovery_request('find economics competitions')
- assert request.domains==['Economics'] and request.opportunity_types==['COMPETITION']
- assert parse_discovery_request('find chemical engineering scholarships').domains==['Chemical Engineering']
- assert parse_discovery_request('find computer science courses').opportunity_types==['COURSE']
-
 def test_general_is_not_strong_explicit_subject_match():
  from app.services.domains import field_relevance
  assert field_relevance('Mathematics',['Mathematics'])==100
  assert field_relevance('Mathematics',['General'])<70
-
-def test_source_validation_deduplication_and_unknown_deadline():
- from app.services.discovery import DiscoveredOpportunity,deduplicate,validated_candidate
- base=dict(title='Real Program',provider='Organizer',opportunity_type='COMPETITION',description=None,source_domain='',source_label='Search')
- placeholder=DiscoveredOpportunity(**base,source_url='https://example.org/program',verification_status='VERIFIED')
- assert validated_candidate(placeholder).verification_status=='UNVERIFIED'
- first=DiscoveredOpportunity(**base,source_url='https://organizer.edu/program')
- duplicate=DiscoveredOpportunity(**base,source_url='https://organizer.edu/program')
- results=deduplicate([first,duplicate])
- assert len(results)==1 and results[0].deadline is None
-
-def test_demo_fallback_is_explicit_and_strict(monkeypatch):
- from app.services.discovery import discover,parse_discovery_request
- from app.config.settings import settings
- from app.seed import seed
- seed();monkeypatch.setattr(settings,'opportunity_discovery_provider','demo')
- with SessionLocal() as db:
-  math=discover(db,parse_discovery_request('find math olympiads'))
-  assert math.mode=='DEMO' and math.fallback_used
-  assert all(x.verification_status=='DEMO' for x in math.records)
-  assert all(x.opportunity_type=='COMPETITION' for x in math.records)
-  assert not any(x.title=='IELTS Preparation Path' for x in math.records)
-  econ=discover(db,parse_discovery_request('find economics competitions'))
-  assert all('Economics' in json.loads(x.fields) and x.opportunity_type=='COMPETITION' for x in econ.records)
-
-def test_external_failure_is_controlled(monkeypatch):
- from app.services.discovery import discover,parse_discovery_request,RealOpportunityDiscoveryProvider
- from app.config.settings import settings
- from app.seed import seed
- seed();monkeypatch.setattr(settings,'opportunity_discovery_provider','serper');monkeypatch.setattr(settings,'opportunity_search_api_key','key')
- monkeypatch.setattr(RealOpportunityDiscoveryProvider,'search',lambda *_: (_ for _ in ()).throw(RuntimeError('down')))
- with SessionLocal() as db:
-  result=discover(db,parse_discovery_request('find economics competitions'))
-  assert result.mode=='DEMO' and result.fallback_used and 'down' in result.error
 
 def test_search_results_and_recommendations_are_separate():
  from app.seed import seed

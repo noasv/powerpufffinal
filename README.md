@@ -28,6 +28,7 @@ Opportunity lists answer “what exists?” Pathly answers “given my goal and 
 - Profile changes (including the IELTS demo) recalculate gaps/readiness and preserve snapshots.
 - Contextual AI advisor and requirement-grounded document review.
 - Real OpenAI-compatible provider with retry and automatic Demo AI fallback.
+- Qualified Serper discovery that separates raw leads from admitted opportunities, rejects social/forum/listicle content, and preserves unknown facts as unknown.
 
 ## Architecture and project structure
 
@@ -73,6 +74,16 @@ AI_BASE_URL=https://api.openai.com/v1
 ```
 
 Keys remain backend-only. Real calls use controlled timeout/retry; any provider/JSON failure falls back without breaking the flow. AI interprets text but never changes stored official facts or deterministic eligibility/scoring.
+
+Optional live opportunity discovery is server-side only:
+
+```env
+OPPORTUNITY_DISCOVERY_PROVIDER=serper
+SERPER_API_KEY=your_server_side_key
+DISCOVERY_TIMEOUT_SECONDS=10
+```
+
+Raw search records are classified before persistence. Social media, forums, search aggregators, listicles, news/blog posts, advice pages, malformed URLs, duplicates, and records without strict subject/type evidence are rejected. Admitted records remain `SOURCE_FOUND` unless stronger verification has actually occurred; missing deadlines, funding, cost, language, and eligibility facts stay unknown. Provider failure triggers an explicitly labeled demo fallback, while a successful search with no qualified records returns an empty result rather than unrelated demo content.
 
 ## Database, migrations, and seed data
 

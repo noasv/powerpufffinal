@@ -1,218 +1,112 @@
-"""Source-backed opportunity discovery, independent from the AI provider.
+"""External opportunity discovery with a hard qualification boundary.
 
-Search API output is deliberately treated as untrusted candidate data.  Only the
-validator in this module can turn it into a persisted Opportunity row.
+Search engine records are leads, never Opportunity objects.  This module only
+admits a result when deterministic evidence indicates that the result itself is
+a concrete program page on a source suitable to show users.
 """
-from __future__ import annotations
-
-import json
-import re
-from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
-from urllib.parse import urlparse
-from typing import Any
-
+from enum import Enum
+import json,re
+from urllib.parse import urlsplit,urlunsplit
 import httpx
-from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
-
 from ..config.settings import settings
 from ..models import Opportunity
-from .domains import clean, detect_opportunity_type, field_relevance, requested_domains
+from .domains import DOMAIN_ALIASES,clean,detect_opportunity_type,requested_domains
 
+class ResultCategory(str,Enum):
+ CONCRETE_OPPORTUNITY="CONCRETE_OPPORTUNITY";OFFICIAL_OPPORTUNITY_PAGE="OFFICIAL_OPPORTUNITY_PAGE";DIRECTORY_OR_LISTICLE="DIRECTORY_OR_LISTICLE";NEWS_OR_BLOG="NEWS_OR_BLOG";SOCIAL_MEDIA="SOCIAL_MEDIA";FORUM="FORUM";SEARCH_AGGREGATOR="SEARCH_AGGREGATOR";GENERAL_INFORMATION="GENERAL_INFORMATION";UNKNOWN="UNKNOWN"
 
-class DiscoveryRequest(BaseModel):
-    query: str
-    domains: list[str] = Field(default_factory=list)
-    opportunity_types: list[str] = Field(default_factory=list)
-    countries: list[str] = Field(default_factory=list)
-    delivery_modes: list[str] = Field(default_factory=list)
-    funding_required: bool = False
-    student_level: str = "HIGH_SCHOOL"
+@dataclass(frozen=True)
+class RawSearchResult:
+ title:str; url:str; snippet:str=""
 
+SOCIAL={"facebook.com","instagram.com","linkedin.com","tiktok.com","x.com","twitter.com","youtube.com"}
+FORUMS={"reddit.com","quora.com","stackexchange.com"}
+AGGREGATORS={"google.com","bing.com","search.yahoo.com"}
+BLOG_HOSTS={"medium.com","substack.com","blogspot.com","wordpress.com"}
+LISTICLE=re.compile(r"\b(top|best)\s+\d+\b|\b\d+\s+(best\s+)?(olympiads?|competitions?|scholarships?|opportunities)\b|\blist of\b",re.I)
+ADVICE=re.compile(r"\b(how to|guide to|tips for|what is|why (join|enter)|rankings?|roundup|resources? for)\b",re.I)
+NEWS=re.compile(r"\b(news|blog|article|announces?|winners?|results?|recap)\b",re.I)
+CONCRETE=re.compile(r"\b(olympiad|competition|challenge|scholarship|fellowship|internship|summer school|research program|exchange program|award|grant|bursary)\b",re.I)
 
-class DiscoveredOpportunity(BaseModel):
-    title: str
-    provider: str | None = None
-    opportunity_type: str
-    description: str | None = None
-    official_url: str | None = None
-    source_url: str
-    source_domain: str
-    source_label: str
-    source_type: str = "EXTERNAL"
-    country: str | None = None
-    delivery_mode: str | None = None
-    eligible_countries: list[str] = Field(default_factory=list)
-    education_levels: list[str] = Field(default_factory=list)
-    fields: list[str] = Field(default_factory=list)
-    funding_type: str | None = None
-    funding_amount_text: str | None = None
-    language_requirements: str | None = None
-    deadline: str | None = None
-    start_date: str | None = None
-    requirements_text: str | None = None
-    gap_categories: list[str] = Field(default_factory=list)
-    discovered_at: datetime = Field(default_factory=datetime.utcnow)
-    verified_at: datetime | None = None
-    verification_status: str = "SOURCE_FOUND"
+def domain_of(url:str)->str:
+ try:return urlsplit(url).hostname.lower().removeprefix("www.")
+ except (AttributeError,ValueError):return ""
+def _in(domain:str,blocked:set[str])->bool:return any(domain==x or domain.endswith("."+x) for x in blocked)
+def canonicalize_url(url:str)->str:
+ try:
+  p=urlsplit(url.strip());
+  if p.scheme not in {"http","https"} or not p.hostname:return ""
+  return urlunsplit((p.scheme.lower(),p.netloc.lower(),p.path.rstrip("/") or "/","",""))
+ except ValueError:return ""
 
+def classify(result:RawSearchResult)->ResultCategory:
+ domain=domain_of(result.url); text=f"{result.title} {result.snippet}"; path=urlsplit(result.url).path.lower()
+ if not canonicalize_url(result.url):return ResultCategory.UNKNOWN
+ if _in(domain,SOCIAL):return ResultCategory.SOCIAL_MEDIA
+ if _in(domain,FORUMS) or "forum" in domain:return ResultCategory.FORUM
+ if _in(domain,AGGREGATORS):return ResultCategory.SEARCH_AGGREGATOR
+ if LISTICLE.search(text):return ResultCategory.DIRECTORY_OR_LISTICLE
+ if _in(domain,BLOG_HOSTS) or NEWS.search(result.title) or re.search(r"/(blog|news|articles?|posts?)/",path):return ResultCategory.NEWS_OR_BLOG
+ if ADVICE.search(result.title):return ResultCategory.GENERAL_INFORMATION
+ if not CONCRETE.search(text):return ResultCategory.GENERAL_INFORMATION
+ # Institution, government, and organizer pages are strong first-party signals.
+ if domain.endswith((".edu",".ac.uk",".gov")) or re.search(r"\b(official|apply|application|registration)\b",text,re.I):return ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
+ # A dedicated organizer domain normally shares a meaningful brand word with
+ # the program title. Arbitrary publishers do not get this trust signal.
+ brand={x for x in re.split(r"[^a-z0-9]+",domain.split('.')[0]) if len(x)>3}
+ title_words=set(clean(result.title).split())
+ return ResultCategory.CONCRETE_OPPORTUNITY if brand & title_words else ResultCategory.UNKNOWN
 
-def parse_discovery_request(query: str, student_level: str = "HIGH_SCHOOL") -> DiscoveryRequest:
-    domains = requested_domains(query)
-    typ = detect_opportunity_type(query)
-    return DiscoveryRequest(
-        query=query.strip(), domains=domains, opportunity_types=[typ] if typ else [],
-        funding_required=typ == "SCHOLARSHIP", student_level=student_level,
-    )
+def _title(raw:str)->str:
+ # Remove only obvious browser-title branding; never manufacture a program name.
+ return re.split(r"\s+[|–—]\s+",raw.strip(),maxsplit=1)[0].strip()
+def _provider(raw:RawSearchResult)->str:
+ branded=re.split(r"\s+[|–—]\s+",raw.title.strip(),maxsplit=1)
+ return branded[1].strip() if len(branded)>1 else domain_of(raw.url)
+def qualify(result:RawSearchResult,query:str):
+ category=classify(result)
+ if category not in {ResultCategory.CONCRETE_OPPORTUNITY,ResultCategory.OFFICIAL_OPPORTUNITY_PAGE}:return None,category
+ typ=detect_opportunity_type(f"{query} {result.title} {result.snippet}")
+ domains=requested_domains(query)
+ if not typ or not domains:return None,ResultCategory.UNKNOWN
+ # Explicit query intent is strict: the result must contain the requested subject
+ # in its visible search evidence, rather than inheriting it by assumption.
+ evidence=clean(f"{result.title} {result.snippet}")
+ if not any(any(clean(alias) in evidence for alias in DOMAIN_ALIASES[d]) for d in domains):return None,ResultCategory.GENERAL_INFORMATION
+ url=canonicalize_url(result.url); domain=domain_of(url); first=category==ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
+ return {'title':_title(result.title),'provider':_provider(result),'opportunity_type':typ,'description':result.snippet.strip() or 'Source page found; details have not yet been extracted.','official_url':url,'country':'Unknown','delivery_mode':'UNKNOWN','eligible_countries':'[]','education_levels':'[]','fields':json.dumps(domains),'field_restriction':True,'funding_type':'UNKNOWN','funding_amount_text':None,'cost_text':None,'language_requirements':None,'deadline':None,'requirements_text':'','source_label':'Source Found','gap_categories':'[]','source_url':url,'source_type':category.value,'source_domain':domain,'verification_status':'SOURCE_FOUND','discovered_at':datetime.utcnow(),'canonical_source_url':url,'discovery_source_url':url,'source_quality':'FIRST_PARTY' if first else 'CREDIBLE_SOURCE','is_first_party':first,'verification_notes':'Search evidence identifies a concrete opportunity; structured facts remain unverified.','last_checked_at':datetime.utcnow()},category
 
+class SerperProvider:
+ def search(self,query:str)->list[RawSearchResult]:
+  response=httpx.post(settings.opportunity_search_base_url,headers={'X-API-KEY':settings.opportunity_search_api_key,'Content-Type':'application/json'},json={'q':query,'num':10},timeout=settings.opportunity_search_timeout_seconds)
+  response.raise_for_status(); payload=response.json()
+  if not isinstance(payload,dict) or not isinstance(payload.get('organic',[]),list):raise ValueError('Malformed discovery response')
+  return [RawSearchResult(str(x.get('title','')),str(x.get('link','')),str(x.get('snippet',''))) for x in payload['organic'] if isinstance(x,dict)]
 
-PLACEHOLDER_DOMAINS = {"example.com", "example.org", "example.net", "localhost"}
+def persist_candidates(db:Session,raw:list[RawSearchResult],query:str):
+ admitted=[];rejected=[];seen=set()
+ for lead in raw:
+  data,category=qualify(lead,query)
+  if not data:rejected.append({'title':lead.title,'category':category.value});continue
+  key=(clean(data['title']),data['source_domain'])
+  if data['canonical_source_url'] in seen or key in seen:rejected.append({'title':lead.title,'category':'DUPLICATE'});continue
+  seen.update((data['canonical_source_url'],key))
+  existing=db.query(Opportunity).filter((Opportunity.canonical_source_url==data['canonical_source_url']) | ((Opportunity.title==data['title']) & (Opportunity.source_domain==data['source_domain']))).first()
+  if existing:
+   admitted.append(existing);continue
+  opp=Opportunity(**data);db.add(opp);db.flush();admitted.append(opp)
+ db.commit();return admitted,rejected
 
-
-def validated_candidate(candidate: DiscoveredOpportunity) -> DiscoveredOpportunity | None:
-    """Validate provenance without claiming that a search snippet verifies facts."""
-    title = re.sub(r"\s+", " ", candidate.title or "").strip()
-    parsed = urlparse(candidate.source_url or "")
-    domain = (parsed.hostname or "").lower().removeprefix("www.")
-    if len(title) < 3 or parsed.scheme not in {"http", "https"} or not domain:
-        return None
-    status = candidate.verification_status
-    if domain in PLACEHOLDER_DOMAINS or domain.endswith(".example.org"):
-        status = "UNVERIFIED"
-    # A search result establishes provenance, not factual verification. VERIFIED
-    # is reserved for a future first-party page verification adapter.
-    if status == "VERIFIED" and candidate.source_type != "OFFICIAL":
-        status = "SOURCE_FOUND"
-    return candidate.model_copy(update={"title": title, "source_domain": domain, "verification_status": status})
-
-
-def deduplicate(candidates: list[DiscoveredOpportunity]) -> list[DiscoveredOpportunity]:
-    unique, urls, names = [], set(), set()
-    for raw in candidates:
-        item = validated_candidate(raw)
-        if not item:
-            continue
-        url_key = item.source_url.rstrip("/").lower()
-        name_key = (clean(item.title), clean(item.provider or ""))
-        if url_key in urls or name_key in names:
-            continue
-        urls.add(url_key); names.add(name_key); unique.append(item)
-    return unique
-
-
-class OpportunityDiscoveryProvider(ABC):
-    @abstractmethod
-    def search(self, request: DiscoveryRequest) -> list[DiscoveredOpportunity]: ...
-
-
-class RealOpportunityDiscoveryProvider(OpportunityDiscoveryProvider):
-    """Serper-compatible web search. Credentials stay exclusively server-side."""
-    def __init__(self, api_key: str | None = None):
-        self.api_key = api_key if api_key is not None else settings.opportunity_search_api_key
-
-    @property
-    def available(self) -> bool:
-        return bool(self.api_key)
-
-    def search(self, request: DiscoveryRequest) -> list[DiscoveredOpportunity]:
-        if not self.available:
-            raise RuntimeError("External opportunity discovery is not configured")
-        query = request.query + " official application opportunity"
-        response = httpx.post(
-            settings.opportunity_search_base_url,
-            headers={"X-API-KEY": self.api_key, "Content-Type": "application/json"},
-            json={"q": query, "num": 10}, timeout=settings.opportunity_search_timeout_seconds,
-        )
-        response.raise_for_status()
-        body = response.json()
-        if not isinstance(body, dict) or not isinstance(body.get("organic", []), list):
-            raise ValueError("Malformed discovery response")
-        results = []
-        for hit in body.get("organic", []):
-            if not isinstance(hit, dict) or not hit.get("title") or not hit.get("link"):
-                continue
-            parsed = urlparse(str(hit["link"]))
-            domain = (parsed.hostname or "").removeprefix("www.")
-            typ = request.opportunity_types[0] if request.opportunity_types else "PROGRAM"
-            results.append(DiscoveredOpportunity(
-                title=str(hit["title"]), provider=None, opportunity_type=typ,
-                description=str(hit.get("snippet")) if hit.get("snippet") else None,
-                source_url=str(hit["link"]), source_domain=domain,
-                source_label=domain, source_type="EXTERNAL_SEARCH",
-                fields=request.domains, education_levels=[request.student_level],
-                verification_status="SOURCE_FOUND",
-            ))
-        return deduplicate(results)
-
-
-class DemoOpportunityDiscoveryProvider(OpportunityDiscoveryProvider):
-    def __init__(self, records: list[Opportunity]): self.records = records
-
-    def search(self, request: DiscoveryRequest) -> list[DiscoveredOpportunity]:
-        results = []
-        for row in self.records:
-            fields = json.loads(row.fields or "[]")
-            if request.domains and not any(field_relevance(d, fields) >= 70 for d in request.domains):
-                continue
-            if request.opportunity_types and row.opportunity_type not in request.opportunity_types:
-                continue
-            results.append(DiscoveredOpportunity(
-                title=row.title, provider=row.provider, opportunity_type=row.opportunity_type,
-                description=row.description, source_url=row.source_url or row.official_url or f"https://example.org/pathly-demo/{row.id}",
-                source_domain="example.org", source_label="Pathly Demo Dataset", source_type="DEMO",
-                country=row.country, delivery_mode=row.delivery_mode, eligible_countries=json.loads(row.eligible_countries or "[]"),
-                education_levels=json.loads(row.education_levels or "[]"), fields=fields,
-                funding_type=row.funding_type, funding_amount_text=row.funding_amount_text,
-                language_requirements=row.language_requirements, deadline=row.deadline.isoformat() if row.deadline else None,
-                requirements_text=row.requirements_text, gap_categories=json.loads(row.gap_categories or "[]"),
-                verification_status="DEMO",
-            ))
-        return results
-
-
-class DiscoveryResult(BaseModel):
-    request: DiscoveryRequest
-    records: list[Any]
-    mode: str
-    fallback_used: bool = False
-    error: str | None = None
-
-
-def _persist(db: Session, item: DiscoveredOpportunity) -> Opportunity:
-    row = db.query(Opportunity).filter(Opportunity.source_url == item.source_url).first()
-    if not row and item.provider:
-        row = db.query(Opportunity).filter(Opportunity.title == item.title, Opportunity.provider == item.provider).first()
-    if not row:
-        row = Opportunity(title=item.title, provider=item.provider or "", opportunity_type=item.opportunity_type, description=item.description or "")
-        db.add(row)
-    values = {
-        "title": item.title, "provider": item.provider or "", "opportunity_type": item.opportunity_type,
-        "description": item.description or "", "official_url": item.official_url or "", "source_url": item.source_url,
-        "source_domain": item.source_domain, "source_label": item.source_label, "source_type": item.source_type,
-        "verification_status": item.verification_status, "discovered_at": item.discovered_at,
-        "country": item.country or "Unknown", "delivery_mode": item.delivery_mode or "UNKNOWN",
-        "eligible_countries": json.dumps(item.eligible_countries), "education_levels": json.dumps(item.education_levels),
-        "fields": json.dumps(item.fields), "funding_type": item.funding_type or "UNKNOWN",
-        "funding_amount_text": item.funding_amount_text, "language_requirements": item.language_requirements,
-        "requirements_text": item.requirements_text or "", "gap_categories": json.dumps(item.gap_categories),
-        "verified_at": item.verified_at.date() if item.verified_at else None,
-    }
-    # Unknown source fields remain unknown rather than retaining/inventing values.
-    for key, value in values.items(): setattr(row, key, value)
-    db.flush(); return row
-
-
-def discover(db: Session, request: DiscoveryRequest) -> DiscoveryResult:
-    real = RealOpportunityDiscoveryProvider()
-    if settings.opportunity_discovery_provider.lower() != "demo" and real.available:
-        try:
-            records = [_persist(db, x) for x in real.search(request)]
-            return DiscoveryResult(request=request, records=records, mode="EXTERNAL")
-        except (httpx.HTTPError, ValueError, RuntimeError) as exc:
-            error = str(exc)
-    else:
-        error = "External discovery is not configured"
-    demo_rows = db.query(Opportunity).filter(Opportunity.verification_status == "DEMO").all()
-    demo = DemoOpportunityDiscoveryProvider(demo_rows).search(request)
-    return DiscoveryResult(request=request, records=[_persist(db, x) for x in demo], mode="DEMO", fallback_used=True, error=error)
+def discover(db:Session,query:str,provider=None):
+ configured=settings.opportunity_discovery_provider.lower()
+ if provider is None:
+  if configured!='serper' or not settings.opportunity_search_api_key:return {'mode':'DEMO','fallback_used':True,'error':'External discovery is not configured.','raw_result_count':0,'rejected_count':0,'admitted':[]}
+  provider=SerperProvider()
+ try:raw=provider.search(query)
+ except Exception as exc:
+  return {'mode':'DEMO','fallback_used':True,'error':f'External provider unavailable: {type(exc).__name__}','raw_result_count':0,'rejected_count':0,'admitted':[]}
+ admitted,rejected=persist_candidates(db,raw,query)
+ return {'mode':'EXTERNAL','fallback_used':False,'error':None,'raw_result_count':len(raw),'rejected_count':len(rejected),'admitted':admitted,'rejections':rejected}
