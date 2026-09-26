@@ -15,6 +15,7 @@ from .services.engines import *
 from .services.ai import ai
 from .services.domains import canonical_domain,detect_opportunity_type,field_relevance,search_matches_domain,clean,requested_domains
 from .services.reviewer import ApplicationReview,deterministic_review,rubric_for,validate_provider_review
+from .services.discovery import discover
 Base.metadata.create_all(engine)
 app=FastAPI(title='Pathly API',version='1.0.0');app.add_middleware(CORSMiddleware,allow_origins=[settings.frontend_url],allow_credentials=True,allow_methods=['*'],allow_headers=['*'])
 passwords=PasswordHash.recommended();oauth=OAuth2PasswordBearer(tokenUrl='/api/auth/login')
@@ -25,6 +26,7 @@ class ProfileIn(BaseModel):
 class GoalIn(BaseModel): title:str;description:str='';goal_type:str='UNIVERSITY_ADMISSION';target_field:str='';target_countries:list[str]=[];target_date:date|None=None;funding_requirement:str='HIGH';education_level:str='BACHELOR';language:str='English'
 class ParseIn(BaseModel): text:str=Field(min_length=5)
 class AdvisorIn(BaseModel): question:str=Field(min_length=2)
+class DiscoveryIn(BaseModel): query:str=Field(min_length=3,max_length=300)
 class ReviewIn(BaseModel): opportunity_id:int;document_type:str='MOTIVATION_LETTER';title:str='Draft';content:str=Field(min_length=1)
 class OnboardingIn(BaseModel): profile:ProfileIn;goal:GoalIn
 def token(u):return jwt.encode({'sub':str(u.id),'exp':datetime.utcnow()+timedelta(hours=12)},settings.jwt_secret,algorithm='HS256')
@@ -138,6 +140,18 @@ def opportunities(search:str='',opportunity_type:str='',country:str='',funding:s
  if search:data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE']
  elif sort=='recommended':data=[x for x in data if x['eligibility_status']!='NOT_ELIGIBLE' and x['field_relevance']>=35]
  key={'readiness':'readiness_score','deadline':'deadline','impact':'gap_impact_score'}.get(sort,'match_score');return sorted(data,key=lambda x:(x[key] is not None,x[key]),reverse=sort!='deadline')
+@app.post('/api/opportunities/discover')
+def discover_opportunities(x:DiscoveryIn,u=Depends(current),db:Session=Depends(get_db)):
+ p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
+ if not p or not g:raise HTTPException(409,'Complete onboarding before discovering opportunities')
+ result=discover(db,x.query);gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False)
+ records=result.pop('admitted')
+ if result['fallback_used']:
+  domains=requested_domains(x.query);typ=detect_opportunity_type(x.query)
+  records=[o for o in db.query(Opportunity).all() if o.source_label=='Demo dataset' and (not typ or o.opportunity_type==typ) and (not domains or any(field_relevance(d,j(o.fields))>=70 for d in domains))]
+ result['admitted_count']=len(records);result['opportunities']=[opportunity_view(p,g,o,gs,r) for o in records]
+ result['no_qualified_results']=result['mode']=='EXTERNAL' and not records
+ return result
 @app.get('/api/opportunities/{oid}')
 def opportunity(oid:int,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u);o=db.get(Opportunity,oid)
@@ -204,18 +218,23 @@ def _advisor_answer(raw, candidates, search_intent, domains=None):
 def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  p=db.query(StudentProfile).filter_by(user_id=u.id).first();g=active(db,u)
  if not p or not g:raise HTTPException(409,'Complete onboarding before using the advisor')
+ question=x.question.lower();requested_type=detect_opportunity_type(question);domains=requested_domains(question)
+ opportunity_words=('opportunit','olympiad','competition','scholarship','program','extracurricular')
+ search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
+ discovery_state=None;external_candidate_ids=None
+ if search_intent and settings.opportunity_discovery_provider.lower()=='serper':
+  discovery_state=discover(db,x.question)
+  if discovery_state['mode']=='EXTERNAL':external_candidate_ids={o.id for o in discovery_state['admitted']}
  gs=db.query(ProfileGap).filter_by(user_id=u.id,goal_id=g.id).all();r=readiness(db,u.id,g,p,False);road=db.query(Roadmap).filter_by(user_id=u.id,goal_id=g.id).first()
  tasks=db.query(RoadmapTask).filter_by(roadmap_id=road.id).all() if road else []
  requirements=db.query(Requirement).filter_by(goal_id=g.id).all()
  all_opps=db.query(Opportunity).all();views=[opportunity_view(p,g,o,gs,r) for o in all_opps]
  context={'user':{'id':u.id,'name':u.name},'profile':profile_dict(p),'goal':{'id':g.id,'title':g.title,'field':g.target_field,'funding':g.funding_requirement,'countries':j(g.target_countries),'education_level':g.education_level,'language':g.language},'requirements':[{'category':z.category,'name':z.name,'target':z.target_value,'source_type':z.source_type} for z in requirements],'open_gaps':[{'title':z.title,'category':z.category,'severity':z.severity,'current_state':z.current_state,'target_state':z.target_state,'evidence':z.evidence} for z in gs if z.status=='OPEN'],'resolved_gaps':[{'title':z.title,'category':z.category} for z in gs if z.status=='RESOLVED'],'readiness':r,'roadmap':{'title':road.title if road else None,'tasks':[{'title':z.title,'status':z.status,'due_date':str(z.due_date),'opportunity_id':z.opportunity_id} for z in tasks]}}
- question=x.question.lower();requested_type=detect_opportunity_type(question);domains=requested_domains(question)
- opportunity_words=('opportunit','olympiad','competition','scholarship','program','extracurricular')
- search_intent=any(term in question for term in ('find','search','recommend','show me')) or ('do i have' in question and any(term in question for term in opportunity_words)) or 'which opportunity' in question
  requested_fields=domains or [g.target_field]
  requested_gap='EXTRACURRICULAR' if 'extracurricular' in question else None
  candidates=[]
  for opp,view in zip(all_opps,views):
+  if external_candidate_ids is not None and opp.id not in external_candidate_ids:continue
   if view['eligibility_status']=='NOT_ELIGIBLE':continue
   relevance=max(field_relevance(field,j(opp.fields)) for field in requested_fields)
   if search_intent and relevance<70:continue
@@ -227,7 +246,10 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  try:raw=ai.complete('ADVISOR_JSON '+json.dumps(prompt))
  except Exception:raw=ai.mock.complete('ADVISOR_JSON '+json.dumps(prompt));ai.last_fallback=True;ai.last_active_provider='mock'
  answer,ids=_advisor_answer(raw,candidates,search_intent,requested_fields if domains else None)
- return {'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
+ response={'answer':answer,'intent':'OPPORTUNITY_SEARCH' if search_intent else 'GUIDANCE','opportunity_ids':ids,'demo_ai':ai.fallback_active,'ai_provider':ai.provider_name}
+ if discovery_state:
+  response['discovery']={'mode':discovery_state['mode'],'fallback_used':discovery_state['fallback_used'],'error':discovery_state['error'],'raw_result_count':discovery_state['raw_result_count'],'rejected_count':discovery_state['rejected_count'],'admitted_count':len(discovery_state['admitted']),'no_qualified_results':discovery_state['mode']=='EXTERNAL' and not discovery_state['admitted']}
+ return response
 @app.post('/api/applications/review')
 def review(x:ReviewIn,u=Depends(current),db:Session=Depends(get_db)):
  opp=db.get(Opportunity,x.opportunity_id)

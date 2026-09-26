@@ -22,7 +22,10 @@ def eligibility(profile, opp, goal=None):
     if j(opp.eligible_countries) and profile.country not in j(opp.eligible_countries) and 'International' not in j(opp.eligible_countries): reasons.append(f'Applicants from {profile.country} are not listed as eligible.')
     if j(opp.education_levels) and profile.education_level not in j(opp.education_levels): reasons.append(f'Requires education level: {", ".join(j(opp.education_levels))}.')
     if goal and opp.field_restriction and field_relevance(goal.target_field,j(opp.fields)) < 50: reasons.append(f'This opportunity is restricted to {", ".join(j(opp.fields))}.')
-    return ('NOT_ELIGIBLE' if reasons else 'ELIGIBLE',reasons or ['Known hard requirements are satisfied.'])
+    if reasons:return 'NOT_ELIGIBLE',reasons
+    if opp.source_label!='Demo dataset' and not any((opp.min_age,opp.max_age,j(opp.eligible_countries),j(opp.education_levels),opp.deadline)):
+        return 'UNKNOWN',['The source result does not provide enough structured eligibility information.']
+    return 'ELIGIBLE',['Known hard requirements are satisfied.']
 
 def sync_gaps(db,user_id,goal,profile):
     english_guidance='Official English certification may be required; exact target depends on selected programs.'
@@ -66,7 +69,7 @@ def opportunity_view(profile,goal,opp,gaps,ready):
     impacts=[{'gap_id':g.id,'category':g.category,'title':g.title,'strength':'HIGH' if g.severity=='HIGH' and impact_score>=45 else 'MEDIUM','reason':f'{opp.title} provides {g.category.lower()} evidence relevant to this open gap.'} for g in open_gaps if g.category in cats]
     strength='HIGH' if impact_score>=70 or any(i['strength']=='HIGH' for i in impacts) else 'MEDIUM' if impact_score>=40 or impacts else 'LOW'
     explanation=(f'Direct {goal.target_field} alignment; helps close '+', '.join(sorted(intersection)).lower()+' gaps.') if relevance>=75 and impacts else (f'Field relevance is low for a {goal.target_field} goal.' if relevance<40 else 'Broad field eligibility; review the stored requirements and gap impact.')
-    return {'id':opp.id,'title':opp.title,'provider':opp.provider,'opportunity_type':opp.opportunity_type,'description':opp.description,'country':opp.country,'delivery_mode':opp.delivery_mode,'funding_type':opp.funding_type,'funding_amount_text':opp.funding_amount_text,'deadline':opp.deadline,'official_url':opp.official_url,'source_label':opp.source_label,'verified_at':opp.verified_at,'requirements_text':opp.requirements_text,'match_score':score,'field_relevance':relevance,'readiness_score':ready['overall'],'eligibility_status':status,'eligibility_reasons':reasons,'gap_impact':strength,'gap_impact_score':impact_score,'impacts':impacts,'explanation':explanation}
+    return {'id':opp.id,'title':opp.title,'provider':opp.provider,'opportunity_type':opp.opportunity_type,'description':opp.description,'country':opp.country,'delivery_mode':opp.delivery_mode,'funding_type':opp.funding_type,'funding_amount_text':opp.funding_amount_text,'deadline':opp.deadline,'official_url':opp.official_url,'source_label':opp.source_label,'verified_at':opp.verified_at,'requirements_text':opp.requirements_text,'match_score':score,'field_relevance':relevance,'readiness_score':ready['overall'],'eligibility_status':status,'eligibility_reasons':reasons,'gap_impact':strength,'gap_impact_score':impact_score,'impacts':impacts,'explanation':explanation,'verification_status':'DEMO' if opp.source_label=='Demo dataset' else ('VERIFIED' if opp.verified_at else 'SOURCE_FOUND'),'source_type':getattr(opp,'source_type',None),'source_domain':getattr(opp,'source_domain',None),'canonical_source_url':getattr(opp,'canonical_source_url',None) or opp.official_url,'source_quality':getattr(opp,'source_quality',None),'is_first_party':getattr(opp,'is_first_party',False),'verification_notes':getattr(opp,'verification_notes',None),'last_checked_at':getattr(opp,'last_checked_at',None)}
 
 def generate_roadmap(db,user,goal,opp=None):
     road=db.query(Roadmap).filter_by(user_id=user.id,goal_id=goal.id).first() or Roadmap(user_id=user.id,goal_id=goal.id,title=f'Path to {goal.title}')

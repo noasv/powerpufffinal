@@ -1,0 +1,112 @@
+"""External opportunity discovery with a hard qualification boundary.
+
+Search engine records are leads, never Opportunity objects.  This module only
+admits a result when deterministic evidence indicates that the result itself is
+a concrete program page on a source suitable to show users.
+"""
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+import json,re
+from urllib.parse import urlsplit,urlunsplit
+import httpx
+from sqlalchemy.orm import Session
+from ..config.settings import settings
+from ..models import Opportunity
+from .domains import DOMAIN_ALIASES,clean,detect_opportunity_type,requested_domains
+
+class ResultCategory(str,Enum):
+ CONCRETE_OPPORTUNITY="CONCRETE_OPPORTUNITY";OFFICIAL_OPPORTUNITY_PAGE="OFFICIAL_OPPORTUNITY_PAGE";DIRECTORY_OR_LISTICLE="DIRECTORY_OR_LISTICLE";NEWS_OR_BLOG="NEWS_OR_BLOG";SOCIAL_MEDIA="SOCIAL_MEDIA";FORUM="FORUM";SEARCH_AGGREGATOR="SEARCH_AGGREGATOR";GENERAL_INFORMATION="GENERAL_INFORMATION";UNKNOWN="UNKNOWN"
+
+@dataclass(frozen=True)
+class RawSearchResult:
+ title:str; url:str; snippet:str=""
+
+SOCIAL={"facebook.com","instagram.com","linkedin.com","tiktok.com","x.com","twitter.com","youtube.com"}
+FORUMS={"reddit.com","quora.com","stackexchange.com"}
+AGGREGATORS={"google.com","bing.com","search.yahoo.com"}
+BLOG_HOSTS={"medium.com","substack.com","blogspot.com","wordpress.com"}
+LISTICLE=re.compile(r"\b(top|best)\s+\d+\b|\b\d+\s+(best\s+)?(olympiads?|competitions?|scholarships?|opportunities)\b|\blist of\b",re.I)
+ADVICE=re.compile(r"\b(how to|guide to|tips for|what is|why (join|enter)|rankings?|roundup|resources? for)\b",re.I)
+NEWS=re.compile(r"\b(news|blog|article|announces?|winners?|results?|recap)\b",re.I)
+CONCRETE=re.compile(r"\b(olympiad|competition|challenge|scholarship|fellowship|internship|summer school|research program|exchange program|award|grant|bursary)\b",re.I)
+
+def domain_of(url:str)->str:
+ try:return urlsplit(url).hostname.lower().removeprefix("www.")
+ except (AttributeError,ValueError):return ""
+def _in(domain:str,blocked:set[str])->bool:return any(domain==x or domain.endswith("."+x) for x in blocked)
+def canonicalize_url(url:str)->str:
+ try:
+  p=urlsplit(url.strip());
+  if p.scheme not in {"http","https"} or not p.hostname:return ""
+  return urlunsplit((p.scheme.lower(),p.netloc.lower(),p.path.rstrip("/") or "/","",""))
+ except ValueError:return ""
+
+def classify(result:RawSearchResult)->ResultCategory:
+ domain=domain_of(result.url); text=f"{result.title} {result.snippet}"; path=urlsplit(result.url).path.lower()
+ if not canonicalize_url(result.url):return ResultCategory.UNKNOWN
+ if _in(domain,SOCIAL):return ResultCategory.SOCIAL_MEDIA
+ if _in(domain,FORUMS) or "forum" in domain:return ResultCategory.FORUM
+ if _in(domain,AGGREGATORS):return ResultCategory.SEARCH_AGGREGATOR
+ if LISTICLE.search(text):return ResultCategory.DIRECTORY_OR_LISTICLE
+ if _in(domain,BLOG_HOSTS) or NEWS.search(result.title) or re.search(r"/(blog|news|articles?|posts?)/",path):return ResultCategory.NEWS_OR_BLOG
+ if ADVICE.search(result.title):return ResultCategory.GENERAL_INFORMATION
+ if not CONCRETE.search(text):return ResultCategory.GENERAL_INFORMATION
+ # Institution, government, and organizer pages are strong first-party signals.
+ if domain.endswith((".edu",".ac.uk",".gov")) or re.search(r"\b(official|apply|application|registration)\b",text,re.I):return ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
+ # A dedicated organizer domain normally shares a meaningful brand word with
+ # the program title. Arbitrary publishers do not get this trust signal.
+ brand={x for x in re.split(r"[^a-z0-9]+",domain.split('.')[0]) if len(x)>3}
+ title_words=set(clean(result.title).split())
+ return ResultCategory.CONCRETE_OPPORTUNITY if brand & title_words else ResultCategory.UNKNOWN
+
+def _title(raw:str)->str:
+ # Remove only obvious browser-title branding; never manufacture a program name.
+ return re.split(r"\s+[|–—]\s+",raw.strip(),maxsplit=1)[0].strip()
+def _provider(raw:RawSearchResult)->str:
+ branded=re.split(r"\s+[|–—]\s+",raw.title.strip(),maxsplit=1)
+ return branded[1].strip() if len(branded)>1 else domain_of(raw.url)
+def qualify(result:RawSearchResult,query:str):
+ category=classify(result)
+ if category not in {ResultCategory.CONCRETE_OPPORTUNITY,ResultCategory.OFFICIAL_OPPORTUNITY_PAGE}:return None,category
+ typ=detect_opportunity_type(f"{query} {result.title} {result.snippet}")
+ domains=requested_domains(query)
+ if not typ or not domains:return None,ResultCategory.UNKNOWN
+ # Explicit query intent is strict: the result must contain the requested subject
+ # in its visible search evidence, rather than inheriting it by assumption.
+ evidence=clean(f"{result.title} {result.snippet}")
+ if not any(any(clean(alias) in evidence for alias in DOMAIN_ALIASES[d]) for d in domains):return None,ResultCategory.GENERAL_INFORMATION
+ url=canonicalize_url(result.url); domain=domain_of(url); first=category==ResultCategory.OFFICIAL_OPPORTUNITY_PAGE
+ return {'title':_title(result.title),'provider':_provider(result),'opportunity_type':typ,'description':result.snippet.strip() or 'Source page found; details have not yet been extracted.','official_url':url,'country':'Unknown','delivery_mode':'UNKNOWN','eligible_countries':'[]','education_levels':'[]','fields':json.dumps(domains),'field_restriction':True,'funding_type':'UNKNOWN','funding_amount_text':None,'cost_text':None,'language_requirements':None,'deadline':None,'requirements_text':'','source_label':'Source Found','gap_categories':'[]','source_type':category.value,'source_domain':domain,'canonical_source_url':url,'discovery_source_url':url,'source_quality':'FIRST_PARTY' if first else 'CREDIBLE_SOURCE','is_first_party':first,'verification_notes':'Search evidence identifies a concrete opportunity; structured facts remain unverified.','last_checked_at':datetime.utcnow()},category
+
+class SerperProvider:
+ def search(self,query:str)->list[RawSearchResult]:
+  response=httpx.post('https://google.serper.dev/search',headers={'X-API-KEY':settings.serper_api_key,'Content-Type':'application/json'},json={'q':query,'num':10},timeout=settings.discovery_timeout_seconds)
+  response.raise_for_status(); payload=response.json()
+  if not isinstance(payload,dict) or not isinstance(payload.get('organic',[]),list):raise ValueError('Malformed discovery response')
+  return [RawSearchResult(str(x.get('title','')),str(x.get('link','')),str(x.get('snippet',''))) for x in payload['organic'] if isinstance(x,dict)]
+
+def persist_candidates(db:Session,raw:list[RawSearchResult],query:str):
+ admitted=[];rejected=[];seen=set()
+ for lead in raw:
+  data,category=qualify(lead,query)
+  if not data:rejected.append({'title':lead.title,'category':category.value});continue
+  key=(clean(data['title']),data['source_domain'])
+  if data['canonical_source_url'] in seen or key in seen:rejected.append({'title':lead.title,'category':'DUPLICATE'});continue
+  seen.update((data['canonical_source_url'],key))
+  existing=db.query(Opportunity).filter((Opportunity.canonical_source_url==data['canonical_source_url']) | ((Opportunity.title==data['title']) & (Opportunity.source_domain==data['source_domain']))).first()
+  if existing:
+   admitted.append(existing);continue
+  opp=Opportunity(**data);db.add(opp);db.flush();admitted.append(opp)
+ db.commit();return admitted,rejected
+
+def discover(db:Session,query:str,provider=None):
+ configured=settings.opportunity_discovery_provider.lower()
+ if provider is None:
+  if configured!='serper' or not settings.serper_api_key:return {'mode':'DEMO','fallback_used':True,'error':'External discovery is not configured.','raw_result_count':0,'rejected_count':0,'admitted':[]}
+  provider=SerperProvider()
+ try:raw=provider.search(query)
+ except Exception as exc:
+  return {'mode':'DEMO','fallback_used':True,'error':f'External provider unavailable: {type(exc).__name__}','raw_result_count':0,'rejected_count':0,'admitted':[]}
+ admitted,rejected=persist_candidates(db,raw,query)
+ return {'mode':'EXTERNAL','fallback_used':False,'error':None,'raw_result_count':len(raw),'rejected_count':len(rejected),'admitted':admitted,'rejections':rejected}
