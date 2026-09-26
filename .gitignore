@@ -1,9 +1,14 @@
 .env
+backend/.env
+frontend/.env
+.env.*
+!.env.example
 *.db
 __pycache__/
 .pytest_cache/
 .venv/
 node_modules/
 dist/
+*.tsbuildinfo
 coverage/
 .DS_Store

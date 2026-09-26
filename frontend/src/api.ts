@@ -52,4 +52,4 @@ export async function apiWithTimeout<T>(path:string,options:RequestInit={},timeo
   throw error;
  }finally{clearTimeout(timer)}
 }
-export type Opportunity={id:number;title:string;provider:string;opportunity_type:string;description:string;country:string;funding_type:string;deadline:string;match_score:number;readiness_score:number;gap_impact:string;eligibility_status:string;explanation:string;impacts:{title:string;strength:string;reason:string}[];official_url:string;source_label:string;requirements_text:string;eligibility_reasons:string[]}
+export type Opportunity={id:number;title:string;provider:string;opportunity_type:string;description:string;country:string;funding_type:string;deadline:string|null;match_score:number;readiness_score:number;gap_impact:string;eligibility_status:string;explanation:string;impacts:{title:string;strength:string;reason:string}[];official_url:string;source_label:string;requirements_text:string;eligibility_reasons:string[];verification_status:'DEMO'|'SOURCE_FOUND'|'VERIFIED';source_domain?:string|null;canonical_source_url?:string|null;last_checked_at?:string|null;is_first_party?:boolean}

@@ -8,5 +8,8 @@ class Settings(BaseSettings):
     ai_base_url: str = "https://api.openai.com/v1"
     ai_timeout_seconds: float = 12.0
     frontend_url: str = "http://localhost:5173"
+    opportunity_discovery_provider: str = "demo"
+    serper_api_key: str = ""
+    discovery_timeout_seconds: float = 10.0
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 settings=Settings()
