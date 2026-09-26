@@ -241,7 +241,11 @@ def advisor(x:AdvisorIn,u=Depends(current),db:Session=Depends(get_db)):
  candidates=[]
  for opp,view in zip(all_opps,views):
   if external_candidate_ids is not None and opp.id not in external_candidate_ids:continue
-  if view['eligibility_status']=='NOT_ELIGIBLE':continue
+  # For explicit external searches, search relevance takes priority over the
+  # user's active goal. Keep a source-backed result even when the active goal
+  # makes its personal eligibility/match low; the UI can still show that
+  # personal assessment separately.
+  if external_candidate_ids is None and view['eligibility_status']=='NOT_ELIGIBLE':continue
   relevance=max(field_relevance(field,j(opp.fields)) for field in requested_fields)
   if search_intent and relevance<70:continue
   if requested_type and opp.opportunity_type!=requested_type:continue
